@@ -103,6 +103,8 @@ type
     procedure LayoutActButtons;
     // 顶栏显式摆放(左侧控件链 + 中间计数标签 + 右端“关于”), 窗口宽度变化时重算
     procedure LayoutTopBar;
+    // 「应用快排」按钮的字样跟着选中的那一行走(选中 explorer -> 显示「explorer快排」), 并按文字加宽
+    procedure UpdateAppTileButton;
 
     function GetProcessName(APID: DWORD): string;
 
@@ -1178,7 +1180,40 @@ end;
 procedure TMainForm.OnListSelectItem(Sender: TObject; Item: TListItem; Selected: Boolean);
 begin
   if Selected and (Item <> nil) and (Item.Caption <> '') then
+  begin
     FSelectedApp := Item.Caption;
+    UpdateAppTileButton;   // 按钮字样跟着选中行走, 一眼看出这一下会排谁
+  end;
+end;
+
+{ 「应用快排」按钮的字样与宽度跟着选中的应用走:
+   选中 explorer 那行 -> 按钮显示「explorer快排」; 没选过任何行时是「应用快排」。
+   宽度按实际文字量算出来(而不是写死), 这样 explorer、WindowsTerminal 这类长名字也显示得下。
+   宽度一变底行就得重排 —— 五个按钮是从右往左依次贴着摆的, 前面变了后面全要跟着挪。 }
+procedure TMainForm.UpdateAppTileButton;
+const
+  MINW = 92;    // 「应用快排」四个字的基准宽度(也是没选中任何行时的宽度)
+  MAXW = 240;   // 兜底上限: 免得某个超长应用名把整行按钮挤到没地方
+  PAD  = 26;    // 文字两侧留白 + 边框
+var
+  cap: string;
+  w: Integer;
+begin
+  if BtnAppTile = nil then Exit;
+  if FSelectedApp = '' then
+    cap := '应用快排'
+  else
+    cap := FSelectedApp + '快排';
+  if BtnAppTile.Caption = cap then
+    Exit;   // 没变就别折腾: 列表每 2.5 秒重建一次, 重建时的选回选中会反复走到这里
+  BtnAppTile.Caption := cap;
+
+  Self.Canvas.Font := BtnAppTile.Font;   // 按钮本身不暴露 Canvas, 用窗体画布量(字体是同一个)
+  w := Self.Canvas.TextWidth(cap) + PAD;
+  if w < MINW then w := MINW;
+  if w > MAXW then w := MAXW;
+  BtnAppTile.Width := w;
+  LayoutActButtons;   // 宽度变了, 底行从右往左重摆一次
 end;
 
 procedure TMainForm.OnFormResize(Sender: TObject);

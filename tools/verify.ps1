@@ -6,6 +6,7 @@
 #   2b) 两列布局 & 显示器下拉: 表头列数==2(无 PID); TComboBox 下拉 >=2 且含 “自动选择”
 #   2c) 顶栏 5 个左侧控件顺序/不重叠(含 选定窗口置顶 / 本窗口置顶)
 #   2d) 置顶行为: 选定窗口置顶 -> 目标窗口 WS_EX_TOPMOST 置位/清除; 本窗口置顶 -> 主窗体自身置位/清除
+#   2e) 点选列表一行: 「应用快排」按钮改名为「<应用名>快排」并按文字加宽(文字量得下 + 底行重排不错位)
 #   3) 表头排序: -sorttest 在程序内按 PID/应用 升序/降序各排一次(真实 SortList 路径)
 #   4) -tileapp DeskTiler 平铺两个目标 -> 校验为均分网格(等大、不相交、相邻)
 #   说明: 本机单显示器, 手动指定屏的“跨屏平铺”无法自动化; 覆盖控件存在 + 自动兜底路径
@@ -32,6 +33,7 @@ public class VW {
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern IntPtr SendMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] public static extern int GetWindowLongW(IntPtr h, int idx);   // idx=-20 -> GWL_EXSTYLE
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] public static extern int CompareStringW(int locale, int dwCmpFlags, string a, int ca, string b, int cb);
 }
@@ -68,6 +70,22 @@ function Rects-Overlap($a,$b){
   return ($a.L -lt $b.R -and $b.L -lt $a.R -and $a.T -lt $b.B -and $b.T -lt $a.B)
 }
 function EX-TopMost($h){ return (([VW]::GetWindowLongW($h,-20)) -band 0x00000008) -ne 0 }   # WS_EX_TOPMOST
+# 文字在“窗体那套字体”(Microsoft YaHei UI 9pt)下的像素宽 —— 走的也是 GDI 度量,
+# 与程序内 Self.Canvas.TextWidth 同一套算法, 所以“按钮够不够宽装下这行字”可以直接断言。
+# (本机 100% 缩放: 顶栏按钮实测宽度与代码里写的 80/86/92/126/108 一模一样, 9pt 即 12px。)
+function Measure-Text($s){
+  Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+  Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+  $f = $null; $bmp = $null; $gfx = $null
+  try {
+    $f = New-Object System.Drawing.Font('Microsoft YaHei UI',9)
+    $bmp = New-Object System.Drawing.Bitmap 1,1
+    $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+    $flags = [System.Windows.Forms.TextFormatFlags]::NoPadding
+    return [System.Windows.Forms.TextRenderer]::MeasureText($s,$f,(New-Object System.Drawing.Size 2000,100),$flags).Width
+  } catch { return -1 }
+  finally { if($gfx){$gfx.Dispose()}; if($bmp){$bmp.Dispose()}; if($f){$f.Dispose()} }
+}
 function Parse-Status($s){
   if($s -match '窗口总数:\s*(\d+).*已选择:\s*(\d+)'){ return @([int]$matches[1],[int]$matches[2]) }
   return $null
@@ -318,6 +336,71 @@ if($h1 -ne [IntPtr]::Zero -and $h2 -ne [IntPtr]::Zero){
     Click-Chk $chkSelf.Hwnd
     Log ("after 取消本窗口置顶: self topmost = {0}" -f (EX-TopMost $h1))
     Chk (-not (EX-TopMost $h1)) '取消“本窗口置顶”: 主窗体恢复普通层级'
+  }
+
+  # ---- (2e) 在列表里点选一行 -> 「应用快排」按钮改名为「应用名+快排」并按文字加宽(2026-09-17 用户要求) ----
+  if($lv){
+    $btnApp = $kids | Where-Object { $_.Cap -eq '应用快排' } | Select-Object -First 1
+    if($btnApp){
+      $bh  = $btnApp.Hwnd
+      $rb0 = Get-RectOf $bh
+      $wb0 = $rb0.R - $rb0.L
+      Log ("appbtn before: cap='{0}' W={1} L={2}" -f (Get-Cap $bh), $wb0, $rb0.L)
+
+      # 往列表第 1 行上真按一下: 客户端坐标 x=60 落在第 0 列(应用程序, 宽 130)的文字区,
+      # 避开最左边那几个像素的勾选框 —— 点文字只选中、不会顺带改勾选状态。
+      # y 不写死(行高随 DPI 变): 从表头下缘起逐个候选值试, 试到按钮改名就停。
+      $clicked = $false
+      foreach($y in 30,26,34,22,38,42,46,50){
+        $lp = [IntPtr]((([int]$y) -shl 16) -bor 60)
+        [void][VW]::PostMessageW($lv, 0x0201, [IntPtr]1, $lp)          # WM_LBUTTONDOWN (MK_LBUTTON)
+        [void][VW]::PostMessageW($lv, 0x0202, [IntPtr]::Zero, $lp)     # WM_LBUTTONUP
+        Start-Sleep -Milliseconds 350
+        if((Get-Cap $bh) -ne '应用快排'){ $clicked = $true; break }
+      }
+
+      $capA = Get-Cap $bh
+      $rb1  = Get-RectOf $bh
+      $wb1  = $rb1.R - $rb1.L
+      Log ("appbtn after : cap='{0}' W={1} R={2} (row1 click hit = {3})" -f $capA, $wb1, $rb1.R, $clicked)
+      Chk $clicked ('点选列表一行后「应用快排」改名成「应用名+快排」: ' + $capA)
+
+      if($clicked){
+        # 名字必须真是那一行的应用名, 不能是随便串上去的 —— 拿系统里正在跑的进程名对一遍
+        $app = $capA -replace '快排$',''
+        $known = @(Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName })
+        Chk ($known -contains $app) ('按钮上的应用名确实来自运行中的进程: ' + $app)
+        Chk ($wb1 -ge $wb0) ('按钮没有因为改名变窄 ({0}px -> {1}px)' -f $wb0, $wb1)
+        # 真正的需求是“文字显示得完整”: 按窗体同一字体量一遍文字像素宽, 按钮必须比它宽
+        $need = Measure-Text $capA
+        Log ("  text '{0}' needs {1}px, button is {2}px" -f $capA, $need, $wb1)
+        Chk ($need -gt 0 -and $wb1 -ge $need) ('按钮够宽, 文字能完整显示 ({0}px 文字 <= {1}px 按钮)' -f $need, $wb1)
+
+        # 宽度一变, 底行就得重排(五个按钮是从右往左贴着摆的): 顺序与不重叠都要重新成立。
+        # 注意 $kids 是改名**之前**抓的快照, 里面那个控件的 Cap 还写着「应用快排」——
+        # 按老名字再查一次会把同一个按钮当成第二个控件收进来, 所以这个位置直接用改名后的 rect。
+        $ar = @{}
+        foreach($n in $actOrder){
+          if($n -eq '应用快排'){ $ar[$capA] = $rb1; continue }
+          $c = $kids | Where-Object { $_.Cap -eq $n } | Select-Object -First 1
+          if($c){ $ar[$n] = Get-RectOf $c.Hwnd }
+        }
+        $names = @($actOrder | ForEach-Object { if($_ -eq '应用快排'){ $capA } else { $_ } })
+        $ord2 = $true
+        for($k=1;$k -lt $names.Count;$k++){
+          if($ar[$names[$k]].L -le $ar[$names[$k-1]].L){ $ord2 = $false }
+        }
+        $noOv2 = $true
+        for($k=0;$k -lt $names.Count;$k++){
+          for($j=$k+1;$j -lt $names.Count;$j++){
+            if(Rects-Overlap $ar[$names[$k]] $ar[$names[$j]]){ $noOv2 = $false }
+          }
+        }
+        foreach($n in $names){ $rr=$ar[$n]; Log ("  actbtn(after rename) '{0}': L={1} R={2}" -f $n,$rr.L,$rr.R) }
+        Log ("  reorder check: order={0} noOverlap={1} buttons={2}/5" -f $ord2,$noOv2,$ar.Count)
+        Chk ($ord2 -and $noOv2 -and $ar.Count -eq 5) '加宽后底行仍是同样顺序且两两不重叠(重排生效)'
+      }
+    } else { Chk $false '「应用快排」按钮未找到(无法验证改名)' }
   }
 }
 
