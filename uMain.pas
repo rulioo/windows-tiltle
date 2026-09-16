@@ -37,6 +37,7 @@ type
     BtnRefresh: TButton;
     ChkAll, ChkAuto: TCheckBox;   // ChkAll=顶部“全选”复选框; ChkAuto=自动刷新
     BtnTile, BtnAllTile, BtnCmdTile, BtnPsTile: TButton;
+    BtnDirTile, BtnAppTile: TButton;   // 目录快排(explorer) / 应用快排(列表中鼠标选中的那行所属应用)
     pnlActs: TPanel;         // 底部快捷按钮行(含 PowerShell快排/Cmd快排/一键全排); 字段可见以便重排
     CmbCols: TComboBox;
     SpinGap: TSpinEdit;
@@ -52,11 +53,14 @@ type
     AboutTimer: TTimer;         // 移出“关于”/图片后延时关闭, 顺带处理移向图片途中的过渡
     Timer: TTimer;
     FUpdatingAll: Boolean;      // 全选复选框批量勾选期间为 True, 抑制逐行 OnChange 刷新
+    FSelectedApp: string;       // 列表里最近被鼠标点选那行的“应用程序”名(供“应用快排”用):
+                                // 不能用 Lv.Selected 现取 —— 列表每 2.5 秒自动刷新时会 Clear 重建,
+                                // 选中行会被抹掉; 而且点完行还要把鼠标移到按钮上, 中间早就刷新过了。
 
     procedure BuildUI;
     procedure RefreshApps;
     procedure UpdateStatus;
-    procedure PopulateList;      // 用 FEnumList 重建列表, 尽量保留勾选
+    procedure PopulateList;      // 用 FEnumList 重建列表, 尽量保留勾选与选中行
     procedure SortList;          // 按 FSortCol / FSortAsc 排序 FEnumList
     procedure UpdateHeaderArrows; // 在表头画上/下箭头指示排序方向
     procedure OnRefreshClick(Sender: TObject);
@@ -65,11 +69,14 @@ type
     procedure OnAllTileClick(Sender: TObject);
     procedure OnCmdTileClick(Sender: TObject);
     procedure OnPsTileClick(Sender: TObject);   // 平铺全部 Windows Terminal / PowerShell 窗口
+    procedure OnDirTileClick(Sender: TObject);  // 平铺全部资源管理器(explorer)窗口
+    procedure OnAppTileClick(Sender: TObject);  // 平铺列表中鼠标选中那行所属应用的全部窗口
     procedure OnColumnClick(Sender: TObject; Column: TListColumn);
     procedure OnAutoToggle(Sender: TObject);
     procedure OnTimerTick(Sender: TObject);
     procedure OnListChange(Sender: TObject; Item: TListItem; Change: TItemChange);
     procedure OnListClicked(Sender: TObject);
+    procedure OnListSelectItem(Sender: TObject; Item: TListItem; Selected: Boolean);
     procedure OnFormResize(Sender: TObject);
     procedure OnMonDropDown(Sender: TObject);   // 展开显示器下拉时刷新监视器列表(热插拔)
 
@@ -102,6 +109,7 @@ type
     procedure TileAll;                       // 一键重排全部窗口
     function IsCmdWin(const W: TWinInfo): Boolean;
     function IsPsWin(const W: TWinInfo): Boolean;
+    function IsDirWin(const W: TWinInfo): Boolean;
 
     class function EnumWndProc(h: HWND; lParam: LPARAM): BOOL; stdcall; static;
     class function EnumMonProc(hMonitor: HMONITOR; hdcMonitor: HDC;
@@ -298,11 +306,18 @@ end;
 procedure TMainForm.PopulateList;
 var
   checkedOld: TDictionary<NativeUInt, Boolean>;
+  selOld: NativeUInt;
   i: Integer;
   item: TListItem;
 begin
   if (FEnumList = nil) or (Lv = nil) then
     Exit;
+
+  // 重建前记住当前选中行是哪个窗口, 重建后按句柄选回去; 否则每 2.5 秒一次的自动刷新
+  // 会把用户刚点选的那一行抹掉, “应用快排”就要用户跟刷新抢时间了。
+  selOld := 0;
+  if Lv.Selected <> nil then
+    selOld := NativeUInt(Lv.Selected.Data);
 
   checkedOld := TDictionary<NativeUInt, Boolean>.Create;
   try
@@ -321,6 +336,8 @@ begin
         item.Data := Pointer(NativeUInt(FEnumList[i].Handle));
         if checkedOld.ContainsKey(NativeUInt(FEnumList[i].Handle)) then
           item.Checked := True;
+        if (selOld <> 0) and (NativeUInt(FEnumList[i].Handle) = selOld) then
+          item.Selected := True;   // 选中行原位保留
       end;
     finally
       Lv.Items.EndUpdate;
@@ -847,6 +864,13 @@ begin
     or (a = 'powershell') or (a = 'pwsh');
 end;
 
+{ 资源管理器窗口判定: 进程名 explorer —— 即每个“文件夹”窗口。
+  桌面/任务栏那些 shell 窗口不是“可见+有标题+无 owner”的顶层主窗口, 本来就不会进枚举结果。 }
+function TMainForm.IsDirWin(const W: TWinInfo): Boolean;
+begin
+  Result := SameText(W.AppName, 'explorer');
+end;
+
 procedure TMainForm.DumpList(const AFileName: string);
 var
   sl: TStringList;
@@ -992,6 +1016,47 @@ begin
   end;
 end;
 
+{ 目录快排: 平铺全部资源管理器(explorer)窗口 —— 判定只看进程名, 与窗口里打开的是哪个文件夹无关 }
+procedure TMainForm.OnDirTileClick(Sender: TObject);
+var
+  L: TList<HWND>;
+  i, cols, rows, n: Integer;
+begin
+  L := TList<HWND>.Create;
+  try
+    for i := 0 to FEnumList.Count - 1 do
+      if IsDirWin(FEnumList[i]) and IsWindow(FEnumList[i].Handle) then
+        L.Add(FEnumList[i].Handle);
+
+    if L.Count = 0 then
+    begin
+      LblMsg.Caption := '未检测到资源管理器(explorer)窗口';
+      Exit;
+    end;
+
+    n := TileWindowsFromList(L, cols, rows);
+    if n > 0 then
+      LblMsg.Caption := Format('已快速平铺 %d 个资源管理器窗口（%d 列 × %d 行）', [n, cols, rows]);
+  finally
+    L.Free;
+  end;
+end;
+
+{ 应用快排: 目标是“鼠标当前选中的应用程序” —— 即列表里被点选(高亮)的那一行,
+  取该行的「应用程序」列(可执行文件名)后, 平铺同名的全部窗口。
+  目标应用名记在 FSelectedApp(见 OnListSelectItem), 不现取 Lv.Selected —— 列表每 2.5 秒
+  自动重建一次, 等鼠标移到按钮上时选中行早没了。
+  没有选中过任何行时给出提示而不是猜: 猜错会把毫不相干的窗口铺满屏幕, 比不做事更糟。 }
+procedure TMainForm.OnAppTileClick(Sender: TObject);
+begin
+  if FSelectedApp = '' then
+  begin
+    LblMsg.Caption := '请先在列表里点选一行（该行的「应用程序」即目标）, 再点“应用快排”';
+    Exit;
+  end;
+  TileByApp(FSelectedApp);   // 内部会写好“已平铺 N 个 xxx 窗口”的提示
+end;
+
 procedure TMainForm.OnColumnClick(Sender: TObject; Column: TListColumn);
 begin
   // 点同一列在升序/降序间切换; 点新列则从升序开始
@@ -1030,6 +1095,14 @@ begin
   UpdateStatus;
 end;
 
+{ 记住“鼠标当前选中的应用程序”: 列表行被点选/被键盘移动到就记下来。
+   这里记的是应用名而不是行对象 —— 行每次自动刷新都会被重建, 应用名不会失效。 }
+procedure TMainForm.OnListSelectItem(Sender: TObject; Item: TListItem; Selected: Boolean);
+begin
+  if Selected and (Item <> nil) and (Item.Caption <> '') then
+    FSelectedApp := Item.Caption;
+end;
+
 procedure TMainForm.OnFormResize(Sender: TObject);
 begin
   if (Lv <> nil) and (Lv.Columns.Count >= 2) then
@@ -1037,25 +1110,36 @@ begin
   LayoutActButtons;   // 快捷按钮组始终贴着底行右端
 end;
 
-{ 底部快捷按钮组: 从右往左依次摆 一键全排 / Cmd快排 / PowerShell快排,
-  所以从左往右看就是 PowerShell快排 → Cmd快排 → 一键全排。 }
+{ 底部快捷按钮组: 从右往左依次摆 一键全排 / Cmd快排 / PowerShell快排 / 目录快排 / 应用快排,
+  所以从左往右看就是 应用快排 → 目录快排 → PowerShell快排 → Cmd快排 → 一键全排
+  (“一键全排”是兜底的那个, 始终排在最右端)。 }
 procedure TMainForm.LayoutActButtons;
+const
+  GAP = 6;      // 按钮之间的横向间隙
+  RMARGIN = 12; // 整组距面板右缘留白
 var
   x, h, y: Integer;
+
+  { 把某个按钮贴着 x 的右端摆好, 返回它左缘的横坐标（即下一个按钮的右端） }
+  function Place(const B: TButton; var CurX: Integer; const AY, AH: Integer): Integer;
+  begin
+    CurX := CurX - B.Width;
+    B.SetBounds(CurX, AY, B.Width, AH);
+    Result := CurX;
+  end;
+
 begin
-  if (pnlActs = nil) or (BtnPsTile = nil) or (BtnCmdTile = nil) or (BtnAllTile = nil) then Exit;
+  if (pnlActs = nil) or (BtnPsTile = nil) or (BtnCmdTile = nil) or (BtnAllTile = nil)
+    or (BtnDirTile = nil) or (BtnAppTile = nil) then Exit;
   h := 26;
   y := (pnlActs.ClientHeight - h) div 2;
   if y < 0 then y := 0;
-  x := pnlActs.ClientWidth - 12;          // 右端留 12px
-  x := x - BtnAllTile.Width;
-  BtnAllTile.SetBounds(x, y, BtnAllTile.Width, h);
-  Dec(x, 6);
-  x := x - BtnCmdTile.Width;
-  BtnCmdTile.SetBounds(x, y, BtnCmdTile.Width, h);
-  Dec(x, 6);
-  x := x - BtnPsTile.Width;
-  BtnPsTile.SetBounds(x, y, BtnPsTile.Width, h);
+  x := pnlActs.ClientWidth - RMARGIN;
+  Place(BtnAllTile, x, y, h);   Dec(x, GAP);
+  Place(BtnCmdTile, x, y, h);   Dec(x, GAP);
+  Place(BtnPsTile,  x, y, h);   Dec(x, GAP);
+  Place(BtnDirTile, x, y, h);   Dec(x, GAP);
+  Place(BtnAppTile, x, y, h);
 end;
 
 { ---------- 构造 UI ---------- }
@@ -1155,6 +1239,7 @@ begin
   Lv.DoubleBuffered := True;
   Lv.OnChange := OnListChange;
   Lv.OnClick := OnListClicked;
+  Lv.OnSelectItem := OnListSelectItem;   // 记录选中的应用程序(供“应用快排”)
   Lv.OnColumnClick := OnColumnClick;
 
   col := Lv.Columns.Add;
@@ -1191,10 +1276,28 @@ begin
   pnlActs.BevelOuter := bvNone;
   pnlActs.Caption := '';
 
-  // 快捷按钮组: 从左到右 = PowerShell快排 / Cmd快排 / 一键全排。
+  // 快捷按钮组: 从左到右 = 应用快排 / 目录快排 / PowerShell快排 / Cmd快排 / 一键全排。
   // 位置由 LayoutActButtons 显式摆放, 不用 alRight 停靠 —— 同一个父容器里多个 alRight
   // 兄弟控件的停靠次序并不等于创建次序(实测对不上, 也正是“关于”链接被盖住那类坑的来源),
-  // 显式算坐标才不会摆错。
+  // 显式算坐标才不会摆错。(创建次序无所谓, 摆放次序只看 LayoutActButtons。)
+  BtnAppTile := TButton.Create(pnlActs);    // 平铺“列表中选中那行”所属应用的全部窗口
+  BtnAppTile.Parent := pnlActs;
+  BtnAppTile.Align := alNone;
+  BtnAppTile.Width := 92;
+  BtnAppTile.Caption := '应用快排';
+  BtnAppTile.OnClick := OnAppTileClick;
+  BtnAppTile.ShowHint := True;   // 悬停给出用法: 得先在列表里点一行
+  BtnAppTile.Hint := '平铺列表中选中那一行所属应用程序的全部窗口（先在列表里点选一行）';
+
+  BtnDirTile := TButton.Create(pnlActs);    // 平铺全部资源管理器(explorer)窗口
+  BtnDirTile.Parent := pnlActs;
+  BtnDirTile.Align := alNone;
+  BtnDirTile.Width := 92;
+  BtnDirTile.Caption := '目录快排';
+  BtnDirTile.OnClick := OnDirTileClick;
+  BtnDirTile.ShowHint := True;
+  BtnDirTile.Hint := '平铺全部资源管理器（文件夹）窗口';
+
   BtnPsTile := TButton.Create(pnlActs);     // 平铺全部 Windows Terminal 窗口
   BtnPsTile.Parent := pnlActs;
   BtnPsTile.Align := alNone;
@@ -1313,7 +1416,7 @@ begin
   BtnTile.AlignWithMargins := True;
   BtnTile.Margins.SetBounds(2, 8, 12, 8);
 
-  LayoutActButtons;   // 摆好底行三个快捷按钮(显式定位)
+  LayoutActButtons;   // 摆好底行五个快捷按钮(显式定位)
 end;
 
 { ---- “关于”链接: 悬停显示收款码图片 ---- }
