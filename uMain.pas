@@ -37,6 +37,7 @@ type
     BtnRefresh: TButton;
     ChkAll, ChkAuto: TCheckBox;   // ChkAll=顶部“全选”复选框; ChkAuto=自动刷新
     BtnTile, BtnAllTile, BtnCmdTile, BtnPsTile: TButton;
+    pnlActs: TPanel;         // 底部快捷按钮行(含 PowerShell快排/Cmd快排/一键全排); 字段可见以便重排
     CmbCols: TComboBox;
     SpinGap: TSpinEdit;
     CmbMon: TComboBox;       // 目标显示器下拉(0=自动选择); Items[1..n] 与 FMonitors 平行
@@ -83,6 +84,9 @@ type
     procedure OnAboutTimer(Sender: TObject);       // 巡检计时器: 鼠标不在链接/小窗内则关闭
     procedure ShowAboutPic;                        // 创建小窗并显示收款码
     procedure HideAboutPic;                        // 关闭收款码小窗
+
+    // 底部快捷按钮组靠右摆放(PowerShell快排 / Cmd快排 / 一键全排), 窗口宽度变化时重算
+    procedure LayoutActButtons;
 
     function GetProcessName(APID: DWORD): string;
 
@@ -1030,13 +1034,35 @@ procedure TMainForm.OnFormResize(Sender: TObject);
 begin
   if (Lv <> nil) and (Lv.Columns.Count >= 2) then
     Lv.Columns[1].Width := Lv.ClientWidth - Lv.Columns[0].Width - 4;  // 标题列撑满, 应用列固定 130
+  LayoutActButtons;   // 快捷按钮组始终贴着底行右端
+end;
+
+{ 底部快捷按钮组: 从右往左依次摆 一键全排 / Cmd快排 / PowerShell快排,
+  所以从左往右看就是 PowerShell快排 → Cmd快排 → 一键全排。 }
+procedure TMainForm.LayoutActButtons;
+var
+  x, h, y: Integer;
+begin
+  if (pnlActs = nil) or (BtnPsTile = nil) or (BtnCmdTile = nil) or (BtnAllTile = nil) then Exit;
+  h := 26;
+  y := (pnlActs.ClientHeight - h) div 2;
+  if y < 0 then y := 0;
+  x := pnlActs.ClientWidth - 12;          // 右端留 12px
+  x := x - BtnAllTile.Width;
+  BtnAllTile.SetBounds(x, y, BtnAllTile.Width, h);
+  Dec(x, 6);
+  x := x - BtnCmdTile.Width;
+  BtnCmdTile.SetBounds(x, y, BtnCmdTile.Width, h);
+  Dec(x, 6);
+  x := x - BtnPsTile.Width;
+  BtnPsTile.SetBounds(x, y, BtnPsTile.Width, h);
 end;
 
 { ---------- 构造 UI ---------- }
 
 procedure TMainForm.BuildUI;
 var
-  pnlTop, pnlBottom, pnlOpts, pnlActs: TPanel;
+  pnlTop, pnlBottom, pnlOpts: TPanel;   // pnlActs 是字段(供 LayoutActButtons 使用)
   col: TListColumn;
 begin
   Self.Caption := Format('DeskTiler v%s — 桌面窗口均匀平铺', [APP_VER_STR]);
@@ -1165,43 +1191,30 @@ begin
   pnlActs.BevelOuter := bvNone;
   pnlActs.Caption := '';
 
-  BtnTile := TButton.Create(pnlActs);       // 最右
-  BtnTile.Parent := pnlActs;
-  BtnTile.Align := alRight;
-  BtnTile.Width := 118;
-  BtnTile.Caption := '平铺排列(&T)';
-  BtnTile.Default := True;
-  BtnTile.OnClick := OnTileClick;
-  BtnTile.Font.Style := [fsBold];
-  BtnTile.AlignWithMargins := True;
-  BtnTile.Margins.SetBounds(2, 7, 12, 7);
-
+  // 快捷按钮组: 从左到右 = PowerShell快排 / Cmd快排 / 一键全排。
+  // 位置由 LayoutActButtons 显式摆放, 不用 alRight 停靠 —— 同一个父容器里多个 alRight
+  // 兄弟控件的停靠次序并不等于创建次序(实测对不上, 也正是“关于”链接被盖住那类坑的来源),
+  // 显式算坐标才不会摆错。
   BtnPsTile := TButton.Create(pnlActs);     // 平铺全部 Windows Terminal 窗口
   BtnPsTile.Parent := pnlActs;
-  BtnPsTile.Align := alRight;
+  BtnPsTile.Align := alNone;
   BtnPsTile.Width := 108;
   BtnPsTile.Caption := 'PowerShell快排';
   BtnPsTile.OnClick := OnPsTileClick;
-  BtnPsTile.AlignWithMargins := True;
-  BtnPsTile.Margins.SetBounds(2, 7, 6, 7);
 
   BtnCmdTile := TButton.Create(pnlActs);
   BtnCmdTile.Parent := pnlActs;
-  BtnCmdTile.Align := alRight;
+  BtnCmdTile.Align := alNone;
   BtnCmdTile.Width := 92;
   BtnCmdTile.Caption := 'Cmd快排';
   BtnCmdTile.OnClick := OnCmdTileClick;
-  BtnCmdTile.AlignWithMargins := True;
-  BtnCmdTile.Margins.SetBounds(2, 7, 6, 7);
 
-  BtnAllTile := TButton.Create(pnlActs);    // 组内最左
+  BtnAllTile := TButton.Create(pnlActs);
   BtnAllTile.Parent := pnlActs;
-  BtnAllTile.Align := alRight;
+  BtnAllTile.Align := alNone;
   BtnAllTile.Width := 92;
   BtnAllTile.Caption := '一键全排';
   BtnAllTile.OnClick := OnAllTileClick;
-  BtnAllTile.AlignWithMargins := True;
-  BtnAllTile.Margins.SetBounds(2, 7, 6, 7);
 
   // 上行: 三个选项组; 每个说明 label 都在其控件左方
   pnlOpts := TPanel.Create(pnlBottom);
@@ -1287,6 +1300,20 @@ begin
   CmbMon.AlignWithMargins := True;
   CmbMon.Margins.SetBounds(0, 8, 4, 8);
   RefreshMonitors;   // 初始填入 “自动” + 当前每台显示器
+
+  // 平铺排列(&T): 与参数(列数/间距/显示器)同一行, 靠右放 —— 主按钮, 醒目且不占快捷按钮行
+  BtnTile := TButton.Create(pnlOpts);
+  BtnTile.Parent := pnlOpts;
+  BtnTile.Align := alRight;
+  BtnTile.Width := 118;
+  BtnTile.Caption := '平铺排列(&T)';
+  BtnTile.Default := True;
+  BtnTile.OnClick := OnTileClick;
+  BtnTile.Font.Style := [fsBold];
+  BtnTile.AlignWithMargins := True;
+  BtnTile.Margins.SetBounds(2, 8, 12, 8);
+
+  LayoutActButtons;   // 摆好底行三个快捷按钮(显式定位)
 end;
 
 { ---- “关于”链接: 悬停显示收款码图片 ---- }
