@@ -4,27 +4,5 @@
 MAINICON ICON "DeskTiler.ico"
 1 24 "DeskTiler.manifest"
 
-1 VERSIONINFO
- FILEVERSION    1,0,0,0
- PRODUCTVERSION 1,0,0,0
- FILEOS 0x40004L
- FILETYPE 0x1L
-{
-  BLOCK "StringFileInfo"
-  {
-    BLOCK "040904B0"
-    {
-      VALUE "CompanyName", "DeskTiler"
-      VALUE "FileDescription", "DeskTiler - evenly tile open application windows on the desktop"
-      VALUE "FileVersion", "1.0.0.0"
-      VALUE "InternalName", "DeskTiler"
-      VALUE "OriginalFilename", "DeskTiler.exe"
-      VALUE "ProductName", "DeskTiler"
-      VALUE "ProductVersion", "1.0.0.0"
-    }
-  }
-  BLOCK "VarFileInfo"
-  {
-    VALUE "Translation", 0x0409, 1200
-  }
-}
+// 版本资源: 文件编号与构建时间由 build.cmd 每次自动生成(见 tools/bumpversion.ps1)
+#include "DeskTilerVersion.rc"

@@ -121,6 +121,8 @@ implementation
 uses
   Winapi.Dwmapi;
 
+{$I uVersion.inc}   // 版本常量: 由 build.cmd / tools\bumpversion.ps1 每次构建自动生成
+
 const
   ID_Cloaked = 14; { DWMWA_CLOAKED }
   PROCESS_QUERY_LIMITED_INFORMATION = $1000;
@@ -994,7 +996,7 @@ var
   pnlTop, pnlBottom, pnlOpts, pnlActs: TPanel;
   col: TListColumn;
 begin
-  Self.Caption := 'DeskTiler — 桌面窗口均匀平铺';
+  Self.Caption := Format('DeskTiler v%s — 桌面窗口均匀平铺', [APP_VER_STR]);
   Self.Position := poScreenCenter;
   Self.ClientWidth := 680;
   Self.ClientHeight := 580;
@@ -1241,8 +1243,9 @@ var
   P: TPoint;
   mon: TMonitor;
   wa: TRect;
-  w, h: Integer;
+  w, h, capH: Integer;
   img: TImage;
+  pnl: TPanel;
 begin
   if FAboutShown then Exit;                 // 已显示则不再处理
   if FAboutPopup = nil then
@@ -1260,9 +1263,27 @@ begin
     FAboutPopup.Position := poDesigned;
     FAboutPopup.Visible := False;
     FAboutPopup.DoubleBuffered := True;
+    FAboutPopup.Color := clWhite;
     FAboutPopup.OnMouseEnter := OnAboutPopupEnter;
     FAboutPopup.OnMouseLeave := OnAboutPopupLeave;
     FAboutPopup.OnClick := OnAboutPopupClick;
+
+    // 底部版本条: 构建号每次自增, 一眼看出是否已更新
+    capH := 22;
+    pnl := TPanel.Create(FAboutPopup);
+    pnl.Parent := FAboutPopup;
+    pnl.Align := alBottom;          // 有窗口句柄的控件, 鼠标进出事件可靠
+    pnl.Height := capH;
+    pnl.BevelOuter := bvNone;
+    pnl.Color := clWhite;
+    pnl.Font.Color := clGray;
+    pnl.Alignment := taCenter;
+    pnl.Caption := Format('DeskTiler v%s   ·   build %d   ·   %s',
+      [APP_VER_STR, APP_VER_BUILD, APP_BUILD_STAMP]);
+    pnl.Cursor := crHandPoint;
+    pnl.OnMouseEnter := OnAboutPopupEnter;
+    pnl.OnMouseLeave := OnAboutPopupLeave;
+    pnl.OnClick := OnAboutPopupClick;
 
     img := TImage.Create(FAboutPopup);
     img.Parent := FAboutPopup;
@@ -1288,8 +1309,9 @@ begin
         w := MulDiv(w, 360, h);
         h := 360;
       end;
+    if w < 260 then w := 260;   // 至少留出版本条文字的宽度
     FAboutPopup.ClientWidth := w;
-    FAboutPopup.ClientHeight := h;
+    FAboutPopup.ClientHeight := h + capH;
   end;
 
   // 定位: 放在“关于”链接的右下方(贴顶栏下缘), 移出屏幕就收回

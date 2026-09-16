@@ -49,8 +49,15 @@
 build.cmd
 ```
 
-脚本会用 `powershell` 生成图标、`brcc32` 编译资源、`dcc32` 编译工程。
+脚本会用 `powershell` 生成版本号与图标、`brcc32` 编译资源、`dcc32` 编译工程。
 若 Delphi 装在其它路径，改 `build.cmd` 顶部的 `BDS` 变量即可。
+
+**版本号自增**：每次构建都会先执行 `tools/bumpversion.ps1`，把 `build.number` 加 1，并生成
+`uVersion.inc`（Pascal 版本常量）与 `DeskTilerVersion.rc`（exe 的版本资源），版本形如 `1.0.<构建号>`。
+构建号在 **窗口标题栏**（`DeskTiler v1.0.x — 桌面窗口均匀平铺`）和 **「关于」悬停小窗的底栏**
+（版本 + 构建号 + 构建时间）都会显示，一眼就能确认读到的是不是刚编译出来的那份。
+`build.number` 随仓库提交（记录到哪一号了）；`uVersion.inc` / `DeskTilerVersion.rc` 属于生成物，不进仓库。
+注意：构建号按“构建次数”自增，编译失败的次数也会占用号段（出现跳号属正常）。
 
 ## 说明与限制
 
@@ -66,7 +73,8 @@ build.cmd
 ## 目录
 
 ```
-build.cmd          构建脚本（生成 .ico/.res/.exe）
+build.cmd          构建脚本（生成版本号/.ico/.res/.exe）
+build.number       构建号计数（每次构建 +1，随仓库提交）
 DeskTiler.dpr      工程源码
 uMain.pas         主窗体源码（枚举 + 平铺逻辑，UTF-8 带 BOM）
 uMain.dfm         主窗体 DFM（资源占位，界面为运行时构建）
@@ -74,7 +82,10 @@ uMain.dfm         主窗体 DFM（资源占位，界面为运行时构建）
 DeskTiler.rc       资源脚本（图标 + manifest + 版本信息）
 DeskTiler.manifest 程序清单（Common-Controls v6、asInvoker、PerMonitorV2 DPI）
 tools/makeicon.ps1 图标生成脚本（构建时自动调用）
+tools/bumpversion.ps1 构建号自增并生成 uVersion.inc / DeskTilerVersion.rc（构建时自动调用）
 ```
 
 > 注意：`uMain.pas` 内的中文字符串需以 **UTF-8 带 BOM** 保存，`dcc32` 才能正确识别；
 > `build.cmd` 与 `uMain.dfm`/`DeskTiler.rc`/`manifest` 请保持纯 ASCII（避免不同代码页误解析）。
+> `uVersion.inc`、`DeskTilerVersion.rc` 由构建自动生成（纯 ASCII、无 BOM），已列入 `.gitignore`；
+> `uMain.pas` 里 `{$I uVersion.inc}` 必须放在 implementation 的 `uses` 之后（const 不能写到 uses 前面）。
