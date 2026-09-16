@@ -36,9 +36,12 @@ type
     Lv: TListView;
     BtnRefresh: TButton;
     ChkAll, ChkAuto: TCheckBox;   // ChkAll=顶部“全选”复选框; ChkAuto=自动刷新
+    ChkTop: TCheckBox;            // 窗口置顶: 打勾 = 勾选的目标窗口保持置顶
+    ChkSelfTop: TCheckBox;        // 本窗口置顶: DeskTiler 自己始终在最前, 平铺后不被埋掉
     BtnTile, BtnAllTile, BtnCmdTile, BtnPsTile: TButton;
     BtnDirTile, BtnAppTile: TButton;   // 目录快排(explorer) / 应用快排(列表中鼠标选中的那行所属应用)
     pnlActs: TPanel;         // 底部快捷按钮行(含 PowerShell快排/Cmd快排/一键全排); 字段可见以便重排
+    pnlTop: TPanel;          // 顶部工具条(全选/刷新/自动刷新/窗口置顶/本窗口置顶 + 计数 + 关于)
     CmbCols: TComboBox;
     SpinGap: TSpinEdit;
     CmbMon: TComboBox;       // 目标显示器下拉(0=自动选择); Items[1..n] 与 FMonitors 平行
@@ -73,6 +76,10 @@ type
     procedure OnAppTileClick(Sender: TObject);  // 平铺列表中鼠标选中那行所属应用的全部窗口
     procedure OnColumnClick(Sender: TObject; Column: TListColumn);
     procedure OnAutoToggle(Sender: TObject);
+    procedure OnTopToggle(Sender: TObject);      // “窗口置顶”: 勾选的窗口置顶/取消置顶
+    procedure OnSelfTopToggle(Sender: TObject);  // “本窗口置顶”: DeskTiler 自己置顶/取消置顶
+    procedure ApplyTopMost(const H: HWND; const ATop: Boolean);
+    procedure ApplyTopToChecked(const ATop: Boolean);
     procedure OnTimerTick(Sender: TObject);
     procedure OnListChange(Sender: TObject; Item: TListItem; Change: TItemChange);
     procedure OnListClicked(Sender: TObject);
@@ -94,6 +101,8 @@ type
 
     // 底部快捷按钮组靠右摆放(PowerShell快排 / Cmd快排 / 一键全排), 窗口宽度变化时重算
     procedure LayoutActButtons;
+    // 顶栏显式摆放(左侧控件链 + 中间计数标签 + 右端“关于”), 窗口宽度变化时重算
+    procedure LayoutTopBar;
 
     function GetProcessName(APID: DWORD): string;
 
@@ -954,6 +963,10 @@ begin
     FUpdatingAll := False;
   end;
   UpdateStatus;                // 一次性刷新计数 + 复选框状态
+  // 批量勾选期间 FUpdatingAll 把逐行的 OnListChange 挡掉了, 所以「窗口置顶」打开时
+  // 这里要补一次 —— 否则点“全选”之后新勾上的那一批不会跟着置顶, 与逐个手勾的行为不一致。
+  if (ChkTop <> nil) and ChkTop.Checked then
+    ApplyTopToChecked(True);
 end;
 
 procedure TMainForm.OnTileClick(Sender: TObject);
@@ -1083,10 +1096,75 @@ begin
   RefreshApps;
 end;
 
+{ 置顶/取消置顶单个窗口。
+  用 SetWindowPos 而不是 SetWindowLong(WS_EX_TOPMOST): WS_EX_TOPMOST 是只读的,
+  写它不会改变 Z 序; 而 SWP_NOMOVE/NOSIZE/NOACTIVATE 保证只动层级,
+  不挪窗口、不改大小、也不把用户当前正在打字的窗口抢走焦点。 }
+procedure TMainForm.ApplyTopMost(const H: HWND; const ATop: Boolean);
+const
+  FLAGS = SWP_NOMOVE or SWP_NOSIZE or SWP_NOACTIVATE;
+begin
+  if (H = 0) or not IsWindow(H) then
+    Exit;   // 窗口刚被关掉(列表还是 2.5 秒前的快照), 忽略即可
+  if ATop then
+    SetWindowPos(H, HWND_TOPMOST, 0, 0, 0, 0, FLAGS)
+  else
+    SetWindowPos(H, HWND_NOTOPMOST, 0, 0, 0, 0, FLAGS);
+end;
+
+{ 把「窗口置顶」应用到列表里所有已勾选的窗口。
+   勾选期间(OnListChange 里)新勾上的行也会立即置顶, 见那里的注释。 }
+procedure TMainForm.ApplyTopToChecked(const ATop: Boolean);
+var
+  i, n: Integer;
+begin
+  if Lv = nil then Exit;
+  n := 0;
+  for i := 0 to Lv.Items.Count - 1 do
+    if Lv.Items[i].Checked then
+    begin
+      ApplyTopMost(HWND(NativeUInt(Lv.Items[i].Data)), ATop);
+      Inc(n);
+    end;
+  if n = 0 then
+    // 一个都没勾就没什么可置顶的 —— 说清楚, 不要默默什么都不做
+    LblMsg.Caption := '请先在列表里勾选要置顶的窗口'
+  else if ATop then
+    LblMsg.Caption := Format('已把 %d 个勾选的窗口置顶', [n])
+  else
+    LblMsg.Caption := Format('已取消 %d 个窗口的置顶', [n]);
+end;
+
+{ 「窗口置顶」复选框: 打勾 = 把当前勾选的目标窗口设为置顶, 取消 = 取消置顶。
+   之后每勾选一行, 那一行也会立刻跟着置顶(见 OnListChange)——
+   否则用户勾了一行却还要再点一次复选框才生效, 与复选框给人的“开关”预期不符。 }
+procedure TMainForm.OnTopToggle(Sender: TObject);
+begin
+  ApplyTopToChecked(ChkTop.Checked);
+end;
+
+{ 「本窗口置顶」复选框: DeskTiler 自己始终浮在最前。
+   平铺收尾会逐个激活目标窗口(见 TileWindowsFromList), 不置顶的话工具窗口
+   立刻被刚排好的窗口埋掉, 想再点一下按钮得先去任务栏找它。 }
+procedure TMainForm.OnSelfTopToggle(Sender: TObject);
+const
+  FLAGS = SWP_NOMOVE or SWP_NOSIZE or SWP_NOACTIVATE;
+begin
+  if not HandleAllocated then Exit;
+  if ChkSelfTop.Checked then
+    SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, FLAGS)
+  else
+    SetWindowPos(Handle, HWND_NOTOPMOST, 0, 0, 0, 0, FLAGS);
+end;
+
 procedure TMainForm.OnListChange(Sender: TObject; Item: TListItem; Change: TItemChange);
 begin
   if FUpdatingAll then
     Exit;   // 全选复选框批量勾选中, 末尾统一刷新一次
+  // 「窗口置顶」打开着的时候, 新勾上的行立即生效(这时 Change 是 ctState;
+  // 文字/图像变化也会走到这里, 所以要判一下, 免得每次刷新都把每个窗口重设一遍)。
+  if (ChkTop <> nil) and ChkTop.Checked and (Item <> nil) and (Change = ctState) then
+    ApplyTopMost(HWND(NativeUInt(Item.Data)), Item.Checked);
   UpdateStatus;
 end;
 
@@ -1108,6 +1186,48 @@ begin
   if (Lv <> nil) and (Lv.Columns.Count >= 2) then
     Lv.Columns[1].Width := Lv.ClientWidth - Lv.Columns[0].Width - 4;  // 标题列撑满, 应用列固定 130
   LayoutActButtons;   // 快捷按钮组始终贴着底行右端
+  LayoutTopBar;       // 顶栏: 左侧控件链 + 中间计数标签 + 右端“关于”
+end;
+
+{ 顶栏布局: 左侧五个控件从左到右 = 全选 / 刷新 / 自动刷新 / 窗口置顶 / 本窗口置顶,
+   右端贴边是“关于”链接, 中间剩下的宽度全部给计数标签。
+   和底行快捷按钮同理, **一律不用 alLeft/alClient 停靠**: 同一个父容器里多个 alLeft
+   兄弟控件的停靠次序并不等于创建次序（实测把第 2 个创建的“刷新”按钮摆到了最右端,
+   顺序变成 全选/自动刷新/窗口置顶/本窗口置顶/刷新）, 显式算坐标才不会摆错;
+   计数标签也就不必再靠 alClient 自动让位, 不会被左侧控件压住。 }
+procedure TMainForm.LayoutTopBar;
+const
+  GAP = 8;      // 控件之间的横向间隙
+  LMARGIN = 8;  // 最左留白
+  RMARGIN = 12; // “关于”距右缘留白
+  CH = 24;      // 顶栏控件统一高度
+var
+  y, x, w, aboutW: Integer;
+
+  { 从左往右摆一个控件, 并把游标推到下一个位置 }
+  procedure Place(const C: TControl; const AW: Integer);
+  begin
+    C.SetBounds(x, y, AW, CH);
+    Inc(x, AW + GAP);
+  end;
+
+begin
+  if (pnlTop = nil) or (ChkAll = nil) or (BtnRefresh = nil) or (ChkAuto = nil)
+    or (ChkTop = nil) or (ChkSelfTop = nil) or (LblAbout = nil) or (LblStatus = nil) then
+    Exit;
+  y := (pnlTop.ClientHeight - CH) div 2;
+  if y < 0 then y := 0;
+  x := LMARGIN;
+  Place(ChkAll,     80);
+  Place(BtnRefresh, 86);
+  Place(ChkAuto,    92);
+  Place(ChkTop,     92);
+  Place(ChkSelfTop, 108);
+  aboutW := LblAbout.Width;
+  LblAbout.SetBounds(pnlTop.ClientWidth - RMARGIN - aboutW, y, aboutW, CH);
+  w := LblAbout.Left - GAP - x;   // 计数标签吃掉中间所有剩余宽度
+  if w < 0 then w := 0;
+  LblStatus.SetBounds(x, y, w, CH);
 end;
 
 { 底部快捷按钮组: 从右往左依次摆 一键全排 / Cmd快排 / PowerShell快排 / 目录快排 / 应用快排,
@@ -1146,12 +1266,14 @@ end;
 
 procedure TMainForm.BuildUI;
 var
-  pnlTop, pnlBottom, pnlOpts: TPanel;   // pnlActs 是字段(供 LayoutActButtons 使用)
+  pnlBottom, pnlOpts: TPanel;   // pnlActs / pnlTop 是字段(供 LayoutActButtons / LayoutTopBar 使用)
   col: TListColumn;
 begin
   Self.Caption := Format('DeskTiler v%s — 桌面窗口均匀平铺', [APP_VER_STR]);
   Self.Position := poScreenCenter;
-  Self.ClientWidth := 680;
+  // 顶栏现在有 5 个左侧控件(全选/刷新/自动刷新/窗口置顶/本窗口置顶) + 右侧"关于"链接,
+  // 680 已经挤不下计数标签, 加宽到 780 给 LblStatus 留出约 200px。
+  Self.ClientWidth := 780;
   Self.ClientHeight := 580;
   Self.Font.Name := 'Microsoft YaHei UI';
   Self.Font.Size := 9;
@@ -1159,6 +1281,7 @@ begin
   Self.OnResize := OnFormResize;
 
   // ---- 顶部工具条 ----
+  // 顶栏里所有控件都用 alNone, 位置/宽度全部交给 LayoutTopBar 显式给定 —— 详见那里的注释。
   pnlTop := TPanel.Create(Self);
   pnlTop.Parent := Self;
   pnlTop.Align := alTop;
@@ -1169,37 +1292,56 @@ begin
   // 全选复选框(顶栏最左): 打勾=全选, 取消=全不选; 列表勾选变动时自动反映
   ChkAll := TCheckBox.Create(pnlTop);
   ChkAll.Parent := pnlTop;
-  ChkAll.Align := alLeft;
+  ChkAll.Align := alNone;
   ChkAll.Width := 80;
   ChkAll.Caption := '全选(&A)';
   ChkAll.Checked := False;
   ChkAll.OnClick := OnChkAllClick;
-  ChkAll.AlignWithMargins := True;
-  ChkAll.Margins.SetBounds(8, 10, 4, 10);
 
   BtnRefresh := TButton.Create(pnlTop);
   BtnRefresh.Parent := pnlTop;
-  BtnRefresh.Align := alLeft;
+  BtnRefresh.Align := alNone;
   BtnRefresh.Width := 86;
   BtnRefresh.Caption := '刷新(&R)';
   BtnRefresh.OnClick := OnRefreshClick;
-  BtnRefresh.AlignWithMargins := True;
-  BtnRefresh.Margins.SetBounds(0, 6, 4, 6);
 
   ChkAuto := TCheckBox.Create(pnlTop);
   ChkAuto.Parent := pnlTop;
-  ChkAuto.Align := alLeft;
+  ChkAuto.Align := alNone;
   ChkAuto.Width := 92;
   ChkAuto.Caption := '自动刷新';
   ChkAuto.Checked := True;
   ChkAuto.OnClick := OnAutoToggle;
-  ChkAuto.AlignWithMargins := True;
-  ChkAuto.Margins.SetBounds(8, 6, 4, 6);
+
+  // 置顶控制(两个, 各管一头):
+  //   窗口置顶   —— 管列表里**被勾选的目标窗口**: 打勾=这些窗口浮在最前, 取消=恢复普通层级;
+  //                 开关打开期间, 之后每勾一行都会立刻生效(见 OnListChange)。
+  //   本窗口置顶 —— 管**DeskTiler 自己**: 平铺收尾会逐个激活目标窗口, 本工具会被埋到后面,
+  //                 勾上它就一直浮着, 方便连点几次快排。
+  ChkTop := TCheckBox.Create(pnlTop);
+  ChkTop.Parent := pnlTop;
+  ChkTop.Align := alNone;
+  ChkTop.Width := 92;
+  ChkTop.Caption := '窗口置顶';
+  ChkTop.Checked := False;
+  ChkTop.OnClick := OnTopToggle;
+  ChkTop.ShowHint := True;
+  ChkTop.Hint := '把列表中已勾选的窗口设为置顶（浮在所有窗口最前）；取消则恢复普通层级';
+
+  ChkSelfTop := TCheckBox.Create(pnlTop);
+  ChkSelfTop.Parent := pnlTop;
+  ChkSelfTop.Align := alNone;
+  ChkSelfTop.Width := 108;
+  ChkSelfTop.Caption := '本窗口置顶';
+  ChkSelfTop.Checked := False;
+  ChkSelfTop.OnClick := OnSelfTopToggle;
+  ChkSelfTop.ShowHint := True;
+  ChkSelfTop.Hint := '让 DeskTiler 自己的窗口始终保持最前（平铺后不会被刚排好的窗口盖住）';
 
   // “关于”链接: 悬停显示收款码图片(位于顶栏最右侧贴边)
   LblAbout := TLabel.Create(pnlTop);
   LblAbout.Parent := pnlTop;
-  LblAbout.Align := alRight;
+  LblAbout.Align := alNone;   // 位置由 LayoutTopBar 给定(顶栏最右端贴边)
   LblAbout.Caption := '关于';
   LblAbout.AutoSize := False;
   LblAbout.Width := 44;
@@ -1210,20 +1352,17 @@ begin
   LblAbout.OnMouseEnter := OnAboutMouseEnter;
   LblAbout.OnMouseLeave := OnAboutMouseLeave;
   LblAbout.OnClick := OnAboutClick;
-  LblAbout.AlignWithMargins := True;
-  LblAbout.Margins.SetBounds(6, 12, 12, 12);
 
   LblStatus := TStaticText.Create(pnlTop);
   LblStatus.Parent := pnlTop;
-  // 必须用 alClient(占满左侧按钮与右侧“关于”链接之间的剩余宽度), 不能也用 alRight:
-  // LblStatus 是**有窗口句柄**的控件, 若与无句柄的“关于”TLabel 抢同一块右侧空间,
-  // 它会盖住链接 —— 鼠标事件全被它的窗口吃掉, 链接的 OnMouseEnter/OnClick 永远不触发。
-  LblStatus.Align := alClient;
+  // 计数标签**有窗口句柄**, 一旦与无句柄的“关于”TLabel 有像素重叠, 它就会把链接盖住 ——
+  // 鼠标事件全被它的窗口吃掉, 链接的 OnMouseEnter/OnClick 永远不触发（2026-09-16 的坑）。
+  // 现在两者都由 LayoutTopBar 显式定位: 标签吃满左侧控件链与右侧链接之间的全部剩余宽度,
+  // 结构上不可能重叠, 也就不再依赖 alClient 的自动让位。
+  LblStatus.Align := alNone;
   LblStatus.AutoSize := False;
   LblStatus.Alignment := taRightJustify;
   LblStatus.Color := clBtnFace;
-  LblStatus.AlignWithMargins := True;
-  LblStatus.Margins.SetBounds(0, 0, 12, 0);
 
   // ---- 列表 ----
   Lv := TListView.Create(Self);
@@ -1417,6 +1556,7 @@ begin
   BtnTile.Margins.SetBounds(2, 8, 12, 8);
 
   LayoutActButtons;   // 摆好底行五个快捷按钮(显式定位)
+  LayoutTopBar;       // 摆好顶栏(显式定位)
 end;
 
 { ---- “关于”链接: 悬停显示收款码图片 ---- }

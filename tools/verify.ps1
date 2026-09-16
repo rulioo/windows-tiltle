@@ -3,6 +3,8 @@
 #   1) 界面元素: 一键全排/Cmd快排/PowerShell快排/目录快排/应用快排 按钮 + 顶部“全选”复选框 + 计数
 #   2) 计数联动: 顶部“全选”复选框 打勾/取消 联动 “已选择”(BM_GETCHECK 校验状态)
 #   2b) 两列布局 & 显示器下拉: 表头列数==2(无 PID); TComboBox 下拉 >=2 且含 “自动选择”
+#   2c) 顶栏 5 个左侧控件顺序/不重叠(含新增的 窗口置顶 / 本窗口置顶)
+#   2d) 置顶行为: 窗口置顶 -> 目标窗口 WS_EX_TOPMOST 置位/清除; 本窗口置顶 -> 主窗体自身置位/清除
 #   3) 表头排序: -sorttest 在程序内按 PID/应用 升序/降序各排一次(真实 SortList 路径)
 #   4) -tileapp DeskTiler 平铺两个目标 -> 校验为均分网格(等大、不相交、相邻)
 #   说明: 本机单显示器, 手动指定屏的“跨屏平铺”无法自动化; 覆盖控件存在 + 自动兜底路径
@@ -29,6 +31,7 @@ public class VW {
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern IntPtr SendMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern int GetWindowLongW(IntPtr h, int idx);   // idx=-20 -> GWL_EXSTYLE
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] public static extern int CompareStringW(int locale, int dwCmpFlags, string a, int ca, string b, int cb);
 }
 "@
@@ -54,6 +57,16 @@ function Get-Cap($h){
   [void][VW]::GetWindowTextW($h,$sb,$sb.Capacity)
   return $sb.ToString()
 }
+function Get-RectOf($h){
+  $r = New-Object VERECT
+  [void][VW]::GetWindowRect($h,[ref]$r)
+  return $r
+}
+# 两个矩形是否相交(边贴边不算)
+function Rects-Overlap($a,$b){
+  return ($a.L -lt $b.R -and $b.L -lt $a.R -and $a.T -lt $b.B -and $b.T -lt $a.B)
+}
+function EX-TopMost($h){ return (([VW]::GetWindowLongW($h,-20)) -band 0x00000008) -ne 0 }   # WS_EX_TOPMOST
 function Parse-Status($s){
   if($s -match '窗口总数:\s*(\d+).*已选择:\s*(\d+)'){ return @([int]$matches[1],[int]$matches[2]) }
   return $null
@@ -115,6 +128,17 @@ if($h1 -ne [IntPtr]::Zero -and $h2 -ne [IntPtr]::Zero){
     Log 'auto-refresh disabled for test'
   } else { Log 'WARN: 自动刷新复选框未找到' }
 
+  # ---- 强制重新枚举一次: 列表是启动时那一帧的快照, 关掉自动刷新后就冻住了,
+  #      而第二个目标窗口可能是在第一个目标建表之后才出现的 -> 不刷新就漏掉它。
+  #      (踩过: “批勾的窗口被置顶”断言因此假失败, 因为 h2 压根不在表里。) ----
+  $ref = $kids | Where-Object { $_.Cap -eq '刷新(&R)' } | Select-Object -First 1
+  if($ref){
+    [void][VW]::SendMessageW($ref.Hwnd, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)   # BM_CLICK
+    Start-Sleep -Milliseconds 1200
+    $kids = Get-ChildInfo $h1
+    Log 'forced re-enumeration (刷新) so both targets are in the list'
+  } else { Log 'WARN: 刷新按钮未找到' }
+
   # ---- (1) 快捷按钮 & 顶部复选框 ----
   $caps = @($kids | ForEach-Object { $_.Cap })
   Chk (($caps -contains '一键全排') -and ($caps -contains 'Cmd快排')) '按钮: 一键全排 / Cmd快排 均存在'
@@ -125,6 +149,8 @@ if($h1 -ne [IntPtr]::Zero -and $h2 -ne [IntPtr]::Zero){
   Chk ($caps -contains '应用快排') '应用快排 按钮存在(平铺列表中选中那行所属应用的全部窗口)'
   Chk ($caps -contains '平铺排列(&T)') '原有按钮: 平铺排列(&T) 存在'
   Chk (($caps -contains '全选(&A)') -and ($caps -contains '自动刷新')) '顶部复选框: 全选 + 自动刷新 均存在'
+  # 置顶控制(2026-09-17 新增): 窗口置顶(管勾选的目标窗口) + 本窗口置顶(管 DeskTiler 自己)
+  Chk (($caps -contains '窗口置顶') -and ($caps -contains '本窗口置顶')) '顶部复选框: 窗口置顶 + 本窗口置顶 均存在'
 
   # ---- (2) 计数标签 & 联动 ----
   $stat = $kids | Where-Object { $_.Cap -like '窗口总数*' } | Select-Object -First 1
@@ -185,6 +211,86 @@ if($h1 -ne [IntPtr]::Zero -and $h2 -ne [IntPtr]::Zero){
       if($n -ge 1){ $anyItems = $true }
     }
     Chk $anyItems '显示器下拉至少含 “自动选择”(CB_GETCOUNT>=1)'
+  }
+
+  # ---- (2c) 顶栏左侧控件: 顺序 + 互不重叠(上次的 关于链接 被盖住就是这么暴露的) ----
+  $topOrder = @('全选(&A)','刷新(&R)','自动刷新','窗口置顶','本窗口置顶')
+  $topRect = @{}
+  foreach($n in $topOrder){
+    $c = $kids | Where-Object { $_.Cap -eq $n } | Select-Object -First 1
+    if($c){ $topRect[$n] = Get-RectOf $c.Hwnd }
+  }
+  $found = @($topOrder | Where-Object { $topRect.ContainsKey($_) })
+  Chk ($found.Count -eq $topOrder.Count) ('顶栏左侧 5 个控件齐全 ({0}/5)' -f $found.Count)
+  foreach($n in $found){ $rr=$topRect[$n]; Log ("  topbar '{0}': L={1} R={2} T={3} B={4}" -f $n,$rr.L,$rr.R,$rr.T,$rr.B) }
+  if($found.Count -eq $topOrder.Count){
+    $ordered = $true
+    for($k=1;$k -lt $topOrder.Count;$k++){
+      if($topRect[$topOrder[$k]].L -le $topRect[$topOrder[$k-1]].L){ $ordered = $false }
+    }
+    Chk $ordered '顶栏左侧控件从左到右 = 全选/刷新/自动刷新/窗口置顶/本窗口置顶(alLeft 停靠次序正确)'
+    $noOverlap = $true
+    for($k=0;$k -lt $topOrder.Count;$k++){
+      for($j=$k+1;$j -lt $topOrder.Count;$j++){
+        if(Rects-Overlap $topRect[$topOrder[$k]] $topRect[$topOrder[$j]]){ $noOverlap = $false }
+      }
+    }
+    Chk $noOverlap '顶栏左侧控件两两不重叠'
+    if($stat){
+      $rs = Get-RectOf $stat.Hwnd
+      $clash = $false
+      foreach($n in $topOrder){ if(Rects-Overlap $topRect[$n] $rs){ $clash = $true } }
+      Chk (-not $clash) '计数标签未被任何顶栏左侧控件压住'
+      Chk ($rs.R - $rs.L -gt 120) ('计数标签宽度足够显示计数 ({0}px)' -f ($rs.R-$rs.L))
+    }
+  }
+
+  # ---- (2d) 置顶行为 ----
+  $chkTop  = $kids | Where-Object { $_.Cap -eq '窗口置顶' }   | Select-Object -First 1
+  $chkSelf = $kids | Where-Object { $_.Cap -eq '本窗口置顶' } | Select-Object -First 1
+  $msg = $kids | Where-Object { $_.Cls -eq 'TStaticText' -and $_.Cap -notlike '窗口总数*' } | Select-Object -First 1
+  Log ("prereq: chkTop={0} chkSelf={1} msg={2}" -f $(if($chkTop){'y'}else{'n'}),$(if($chkSelf){'y'}else{'n'}),$(if($msg){'y'}else{'n'}))
+  if($chkTop -and $chkSelf){
+    $BM_CLICK   = 0x00F5
+    $BM_GETCHK  = 0x00F0
+    $zero = [IntPtr]::Zero
+    function Click-Chk($h){ [void][VW]::SendMessageW($h,$BM_CLICK,$zero,$zero); Start-Sleep -Milliseconds 450 }
+    function Chk-State($h){ return [VW]::SendMessageW($h,$BM_GETCHK,$zero,$zero).ToInt64() }
+
+    Chk ((Chk-State $chkTop.Hwnd) -eq 0 -and (Chk-State $chkSelf.Hwnd) -eq 0) '两个置顶复选框初始均未勾选'
+    Chk (-not (EX-TopMost $h1)) '初始: 目标窗口非置顶'
+
+    # (i) 一个都没勾就打开“窗口置顶” -> 只提示, 不置顶
+    Click-Chk $chkTop.Hwnd
+    $m1 = if($msg){ Get-Cap $msg.Hwnd } else { '' }
+    Log ("after 窗口置顶 (0 checked): chk={0} msg='{1}' topmost={2}" -f (Chk-State $chkTop.Hwnd), $m1, (EX-TopMost $h1))
+    Chk ((Chk-State $chkTop.Hwnd) -eq 1 -and -not (EX-TopMost $h1) -and $m1.Contains('勾选')) '无勾选时打开“窗口置顶”: 仅提示, 不误置顶(复选框仍为勾选态)'
+
+    # (ii) “窗口置顶”开着时点全选 -> 批勾的窗口也要跟着置顶(OnChkAllClick 补的那一次)
+    Click-Chk $chkAll.Hwnd
+    $st3 = Parse-Status (Get-Cap $stat.Hwnd)
+    Log ("after 全选(ChkTop on): {0} | target topmost = {1}" -f (Get-Cap $stat.Hwnd), (EX-TopMost $h1))
+    Chk ($st3 -and $st3[1] -eq $total) '开启“窗口置顶”后点全选: 计数仍正确'
+    # h1 是被我们点按钮的那个实例, 它**不会把自己列进自己的表**; h2 一定会出现 -> 用 h2 断言
+    Chk ((EX-TopMost $h2) -and -not (EX-TopMost $h1)) '批勾的窗口立刻被置顶(h2 置位; h1 是自己, 不在自己的表里)'
+    if($msg){ Chk ((Get-Cap $msg.Hwnd).StartsWith('已把')) ('提示文本: ' + (Get-Cap $msg.Hwnd)) }
+
+    # (iii) 关掉“窗口置顶” -> 消失
+    Click-Chk $chkTop.Hwnd
+    Log ("after 取消窗口置顶: h2 topmost = {0}" -f (EX-TopMost $h2))
+    Chk (-not (EX-TopMost $h2)) '取消“窗口置顶”后 WS_EX_TOPMOST 被清除'
+
+    Click-Chk $chkAll.Hwnd   # 全不选, 恢复原状
+    $st4 = Parse-Status (Get-Cap $stat.Hwnd)
+    Chk ($st4 -and $st4[1] -eq 0) '收尾: 取消全选后 已选择=0'
+
+    # (iv) “本窗口置顶”只影响 DeskTiler 自己
+    Click-Chk $chkSelf.Hwnd
+    Log ("after 本窗口置顶: self topmost = {0}" -f (EX-TopMost $h1))
+    Chk (EX-TopMost $h1) '打开“本窗口置顶”: 主窗体自身 WS_EX_TOPMOST 置位'
+    Click-Chk $chkSelf.Hwnd
+    Log ("after 取消本窗口置顶: self topmost = {0}" -f (EX-TopMost $h1))
+    Chk (-not (EX-TopMost $h1)) '取消“本窗口置顶”: 主窗体恢复普通层级'
   }
 }
 
