@@ -36,12 +36,12 @@ type
     Lv: TListView;
     BtnRefresh: TButton;
     ChkAll, ChkAuto: TCheckBox;   // ChkAll=顶部“全选”复选框; ChkAuto=自动刷新
-    ChkTop: TCheckBox;            // 窗口置顶: 打勾 = 勾选的目标窗口保持置顶
+    ChkTop: TCheckBox;            // 选定窗口置顶: 打勾 = 勾选的目标窗口保持置顶
     ChkSelfTop: TCheckBox;        // 本窗口置顶: DeskTiler 自己始终在最前, 平铺后不被埋掉
     BtnTile, BtnAllTile, BtnCmdTile, BtnPsTile: TButton;
     BtnDirTile, BtnAppTile: TButton;   // 目录快排(explorer) / 应用快排(列表中鼠标选中的那行所属应用)
     pnlActs: TPanel;         // 底部快捷按钮行(含 PowerShell快排/Cmd快排/一键全排); 字段可见以便重排
-    pnlTop: TPanel;          // 顶部工具条(全选/刷新/自动刷新/窗口置顶/本窗口置顶 + 计数 + 关于)
+    pnlTop: TPanel;          // 顶部工具条(全选/刷新/自动刷新/选定窗口置顶/本窗口置顶 + 计数 + 关于)
     CmbCols: TComboBox;
     SpinGap: TSpinEdit;
     CmbMon: TComboBox;       // 目标显示器下拉(0=自动选择); Items[1..n] 与 FMonitors 平行
@@ -76,7 +76,7 @@ type
     procedure OnAppTileClick(Sender: TObject);  // 平铺列表中鼠标选中那行所属应用的全部窗口
     procedure OnColumnClick(Sender: TObject; Column: TListColumn);
     procedure OnAutoToggle(Sender: TObject);
-    procedure OnTopToggle(Sender: TObject);      // “窗口置顶”: 勾选的窗口置顶/取消置顶
+    procedure OnTopToggle(Sender: TObject);      // “选定窗口置顶”: 勾选的窗口置顶/取消置顶
     procedure OnSelfTopToggle(Sender: TObject);  // “本窗口置顶”: DeskTiler 自己置顶/取消置顶
     procedure ApplyTopMost(const H: HWND; const ATop: Boolean);
     procedure ApplyTopToChecked(const ATop: Boolean);
@@ -963,7 +963,7 @@ begin
     FUpdatingAll := False;
   end;
   UpdateStatus;                // 一次性刷新计数 + 复选框状态
-  // 批量勾选期间 FUpdatingAll 把逐行的 OnListChange 挡掉了, 所以「窗口置顶」打开时
+  // 批量勾选期间 FUpdatingAll 把逐行的 OnListChange 挡掉了, 所以「选定窗口置顶」打开时
   // 这里要补一次 —— 否则点“全选”之后新勾上的那一批不会跟着置顶, 与逐个手勾的行为不一致。
   if (ChkTop <> nil) and ChkTop.Checked then
     ApplyTopToChecked(True);
@@ -1112,7 +1112,7 @@ begin
     SetWindowPos(H, HWND_NOTOPMOST, 0, 0, 0, 0, FLAGS);
 end;
 
-{ 把「窗口置顶」应用到列表里所有已勾选的窗口。
+{ 把「选定窗口置顶」应用到列表里所有已勾选的窗口。
    勾选期间(OnListChange 里)新勾上的行也会立即置顶, 见那里的注释。 }
 procedure TMainForm.ApplyTopToChecked(const ATop: Boolean);
 var
@@ -1135,7 +1135,7 @@ begin
     LblMsg.Caption := Format('已取消 %d 个窗口的置顶', [n]);
 end;
 
-{ 「窗口置顶」复选框: 打勾 = 把当前勾选的目标窗口设为置顶, 取消 = 取消置顶。
+{ 「选定窗口置顶」复选框: 打勾 = 把当前勾选的目标窗口设为置顶, 取消 = 取消置顶。
    之后每勾选一行, 那一行也会立刻跟着置顶(见 OnListChange)——
    否则用户勾了一行却还要再点一次复选框才生效, 与复选框给人的“开关”预期不符。 }
 procedure TMainForm.OnTopToggle(Sender: TObject);
@@ -1161,7 +1161,7 @@ procedure TMainForm.OnListChange(Sender: TObject; Item: TListItem; Change: TItem
 begin
   if FUpdatingAll then
     Exit;   // 全选复选框批量勾选中, 末尾统一刷新一次
-  // 「窗口置顶」打开着的时候, 新勾上的行立即生效(这时 Change 是 ctState;
+  // 「选定窗口置顶」打开着的时候, 新勾上的行立即生效(这时 Change 是 ctState;
   // 文字/图像变化也会走到这里, 所以要判一下, 免得每次刷新都把每个窗口重设一遍)。
   if (ChkTop <> nil) and ChkTop.Checked and (Item <> nil) and (Change = ctState) then
     ApplyTopMost(HWND(NativeUInt(Item.Data)), Item.Checked);
@@ -1189,11 +1189,11 @@ begin
   LayoutTopBar;       // 顶栏: 左侧控件链 + 中间计数标签 + 右端“关于”
 end;
 
-{ 顶栏布局: 左侧五个控件从左到右 = 全选 / 刷新 / 自动刷新 / 窗口置顶 / 本窗口置顶,
+{ 顶栏布局: 左侧五个控件从左到右 = 全选 / 刷新 / 自动刷新 / 选定窗口置顶 / 本窗口置顶,
    右端贴边是“关于”链接, 中间剩下的宽度全部给计数标签。
    和底行快捷按钮同理, **一律不用 alLeft/alClient 停靠**: 同一个父容器里多个 alLeft
    兄弟控件的停靠次序并不等于创建次序（实测把第 2 个创建的“刷新”按钮摆到了最右端,
-   顺序变成 全选/自动刷新/窗口置顶/本窗口置顶/刷新）, 显式算坐标才不会摆错;
+   顺序变成 全选/自动刷新/置顶复选框/刷新）, 显式算坐标才不会摆错;
    计数标签也就不必再靠 alClient 自动让位, 不会被左侧控件压住。 }
 procedure TMainForm.LayoutTopBar;
 const
@@ -1221,7 +1221,7 @@ begin
   Place(ChkAll,     80);
   Place(BtnRefresh, 86);
   Place(ChkAuto,    92);
-  Place(ChkTop,     92);
+  Place(ChkTop,     126);   // 必须与 BuildUI 里 ChkTop.Width 一致
   Place(ChkSelfTop, 108);
   aboutW := LblAbout.Width;
   LblAbout.SetBounds(pnlTop.ClientWidth - RMARGIN - aboutW, y, aboutW, CH);
@@ -1271,9 +1271,10 @@ var
 begin
   Self.Caption := Format('DeskTiler v%s — 桌面窗口均匀平铺', [APP_VER_STR]);
   Self.Position := poScreenCenter;
-  // 顶栏现在有 5 个左侧控件(全选/刷新/自动刷新/窗口置顶/本窗口置顶) + 右侧"关于"链接,
-  // 680 已经挤不下计数标签, 加宽到 780 给 LblStatus 留出约 200px。
-  Self.ClientWidth := 780;
+  // 顶栏 5 个左侧控件(全选/刷新/自动刷新/选定窗口置顶/本窗口置顶) + 右侧"关于"链接。
+  // 「选定窗口置顶」比原来的「选定窗口置顶」多两个字, 左侧链条又长了 34px,
+  // 所以宽度从 780 再放到 820, 免得计数标签被挤到看不清。
+  Self.ClientWidth := 820;
   Self.ClientHeight := 580;
   Self.Font.Name := 'Microsoft YaHei UI';
   Self.Font.Size := 9;
@@ -1314,15 +1315,15 @@ begin
   ChkAuto.OnClick := OnAutoToggle;
 
   // 置顶控制(两个, 各管一头):
-  //   窗口置顶   —— 管列表里**被勾选的目标窗口**: 打勾=这些窗口浮在最前, 取消=恢复普通层级;
+  //   选定窗口置顶 —— 管列表里**被勾选的目标窗口**: 打勾=这些窗口浮在最前, 取消=恢复普通层级;
   //                 开关打开期间, 之后每勾一行都会立刻生效(见 OnListChange)。
   //   本窗口置顶 —— 管**DeskTiler 自己**: 平铺收尾会逐个激活目标窗口, 本工具会被埋到后面,
   //                 勾上它就一直浮着, 方便连点几次快排。
   ChkTop := TCheckBox.Create(pnlTop);
   ChkTop.Parent := pnlTop;
   ChkTop.Align := alNone;
-  ChkTop.Width := 92;
-  ChkTop.Caption := '窗口置顶';
+  ChkTop.Width := 126;   // 6 个汉字(选定窗口置顶)比原 4 个字宽, 见 LayoutTopBar 里的同步宽度
+  ChkTop.Caption := '选定窗口置顶';
   ChkTop.Checked := False;
   ChkTop.OnClick := OnTopToggle;
   ChkTop.ShowHint := True;
