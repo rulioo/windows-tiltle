@@ -1,6 +1,6 @@
 ﻿# verify.ps1 - DeskTiler 功能自检(含: 两列布局, 目标显示器下拉, 全选复选框, 平铺后激活)
 # 全部在同一个 PowerShell 进程/桌面内完成, 保证窗口可被枚举。
-#   1) 界面元素: 一键全排/Cmd快排 按钮(已删 PowerShell快排) + 顶部“全选”复选框 + 计数
+#   1) 界面元素: 一键全排/Cmd快排/PowerShell快排 按钮 + 顶部“全选”复选框 + 计数
 #   2) 计数联动: 顶部“全选”复选框 打勾/取消 联动 “已选择”(BM_GETCHECK 校验状态)
 #   2b) 两列布局 & 显示器下拉: 表头列数==2(无 PID); TComboBox 下拉 >=2 且含 “自动选择”
 #   3) 表头排序: -sorttest 在程序内按 PID/应用 升序/降序各排一次(真实 SortList 路径)
@@ -118,7 +118,8 @@ if($h1 -ne [IntPtr]::Zero -and $h2 -ne [IntPtr]::Zero){
   # ---- (1) 快捷按钮 & 顶部复选框 ----
   $caps = @($kids | ForEach-Object { $_.Cap })
   Chk (($caps -contains '一键全排') -and ($caps -contains 'Cmd快排')) '按钮: 一键全排 / Cmd快排 均存在'
-  Chk (-not ($caps -contains 'PowerShell快排')) 'PowerShell快排 按钮已删除'
+  # PowerShell快排: 平铺全部 Windows Terminal / PowerShell 窗口(2026-09 按用户要求加回)
+  Chk ($caps -contains 'PowerShell快排') 'PowerShell快排 按钮存在(平铺全部 Windows Terminal 窗口)'
   Chk ($caps -contains '平铺排列(&T)') '原有按钮: 平铺排列(&T) 存在'
   Chk (($caps -contains '全选(&A)') -and ($caps -contains '自动刷新')) '顶部复选框: 全选 + 自动刷新 均存在'
 

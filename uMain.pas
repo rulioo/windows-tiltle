@@ -8,7 +8,7 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.Generics.Collections,
-  System.Generics.Defaults,
+  System.Generics.Defaults, System.Types,
   Winapi.Windows, Winapi.Messages,
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls,
   Vcl.Graphics, Vcl.Samples.Spin, Vcl.Imaging.jpeg;
@@ -36,7 +36,7 @@ type
     Lv: TListView;
     BtnRefresh: TButton;
     ChkAll, ChkAuto: TCheckBox;   // ChkAll=顶部“全选”复选框; ChkAuto=自动刷新
-    BtnTile, BtnAllTile, BtnCmdTile: TButton;
+    BtnTile, BtnAllTile, BtnCmdTile, BtnPsTile: TButton;
     CmbCols: TComboBox;
     SpinGap: TSpinEdit;
     CmbMon: TComboBox;       // 目标显示器下拉(0=自动选择); Items[1..n] 与 FMonitors 平行
@@ -45,6 +45,9 @@ type
     LblAbout: TLabel;           // 顶部“关于”链接(悬停显示收款码图片)
     FAboutPopup: TForm;         // 悬停弹出的收款码小窗(无边框、置顶、不抢焦点)
     FAboutShown: Boolean;       // 收款码小窗当前是否可见(用于跳过鼠标进入自身引发的重入)
+    FAboutMiss: Integer;        // 鼠标连续几次巡检都不在链接/小窗内(达到阈值才关闭)
+    FAboutHideRect: TRect;      // 上次关闭时小窗的位置(屏幕坐标)
+    FAboutHideGuard: Boolean;   // True 时: 鼠标仍停在小窗原位就不重新弹出(防"点一下又弹回来")
     AboutTimer: TTimer;         // 移出“关于”/图片后延时关闭, 顺带处理移向图片途中的过渡
     Timer: TTimer;
     FUpdatingAll: Boolean;      // 全选复选框批量勾选期间为 True, 抑制逐行 OnChange 刷新
@@ -60,6 +63,7 @@ type
     procedure OnTileClick(Sender: TObject);
     procedure OnAllTileClick(Sender: TObject);
     procedure OnCmdTileClick(Sender: TObject);
+    procedure OnPsTileClick(Sender: TObject);   // 平铺全部 Windows Terminal / PowerShell 窗口
     procedure OnColumnClick(Sender: TObject; Column: TListColumn);
     procedure OnAutoToggle(Sender: TObject);
     procedure OnTimerTick(Sender: TObject);
@@ -74,7 +78,9 @@ type
     procedure OnAboutPopupEnter(Sender: TObject);  // 鼠标进入收款码小窗: 保持显示
     procedure OnAboutPopupLeave(Sender: TObject);  // 移出收款码小窗: 延时关闭
     procedure OnAboutPopupClick(Sender: TObject);  // 点击收款码图片 → 直接关闭
-    procedure OnAboutTimer(Sender: TObject);       // 延时计时到点 → 关闭收款码
+    procedure OnAboutPopupMouseDown(Sender: TObject; Button: TMouseButton;
+      Shift: TShiftState; X, Y: Integer);          // 点击兜底: 图片收不到点击时也能关
+    procedure OnAboutTimer(Sender: TObject);       // 巡检计时器: 鼠标不在链接/小窗内则关闭
     procedure ShowAboutPic;                        // 创建小窗并显示收款码
     procedure HideAboutPic;                        // 关闭收款码小窗
 
@@ -91,6 +97,7 @@ type
       out Cols, Rows: Integer);
     procedure TileAll;                       // 一键重排全部窗口
     function IsCmdWin(const W: TWinInfo): Boolean;
+    function IsPsWin(const W: TWinInfo): Boolean;
 
     class function EnumWndProc(h: HWND; lParam: LPARAM): BOOL; stdcall; static;
     class function EnumMonProc(hMonitor: HMONITOR; hdcMonitor: HDC;
@@ -825,6 +832,17 @@ begin
       or (Pos('command prompt', t) > 0)));
 end;
 
+{ PowerShell/终端窗口判定: Windows Terminal(WindowsTerminal.exe / wt.exe) 的所有窗口,
+  外加老式控制台里直接跑的 powershell.exe / pwsh.exe 窗口。 }
+function TMainForm.IsPsWin(const W: TWinInfo): Boolean;
+var
+  a: string;
+begin
+  a := LowerCase(W.AppName);
+  Result := (a = 'windowsterminal') or (a = 'wt')
+    or (a = 'powershell') or (a = 'pwsh');
+end;
+
 procedure TMainForm.DumpList(const AFileName: string);
 var
   sl: TStringList;
@@ -940,6 +958,31 @@ begin
     n := TileWindowsFromList(L, cols, rows);
     if n > 0 then
       LblMsg.Caption := Format('已快速平铺 %d 个 cmd 窗口（%d 列 × %d 行）', [n, cols, rows]);
+  finally
+    L.Free;
+  end;
+end;
+
+procedure TMainForm.OnPsTileClick(Sender: TObject);
+var
+  L: TList<HWND>;
+  i, cols, rows, n: Integer;
+begin
+  L := TList<HWND>.Create;
+  try
+    for i := 0 to FEnumList.Count - 1 do
+      if IsPsWin(FEnumList[i]) and IsWindow(FEnumList[i].Handle) then
+        L.Add(FEnumList[i].Handle);
+
+    if L.Count = 0 then
+    begin
+      LblMsg.Caption := '未检测到 Windows Terminal / PowerShell 窗口';
+      Exit;
+    end;
+
+    n := TileWindowsFromList(L, cols, rows);
+    if n > 0 then
+      LblMsg.Caption := Format('已快速平铺 %d 个终端窗口（%d 列 × %d 行）', [n, cols, rows]);
   finally
     L.Free;
   end;
@@ -1062,8 +1105,10 @@ begin
 
   LblStatus := TStaticText.Create(pnlTop);
   LblStatus.Parent := pnlTop;
-  LblStatus.Align := alRight;
-  LblStatus.Width := 300;
+  // 必须用 alClient(占满左侧按钮与右侧“关于”链接之间的剩余宽度), 不能也用 alRight:
+  // LblStatus 是**有窗口句柄**的控件, 若与无句柄的“关于”TLabel 抢同一块右侧空间,
+  // 它会盖住链接 —— 鼠标事件全被它的窗口吃掉, 链接的 OnMouseEnter/OnClick 永远不触发。
+  LblStatus.Align := alClient;
   LblStatus.AutoSize := False;
   LblStatus.Alignment := taRightJustify;
   LblStatus.Color := clBtnFace;
@@ -1130,6 +1175,15 @@ begin
   BtnTile.Font.Style := [fsBold];
   BtnTile.AlignWithMargins := True;
   BtnTile.Margins.SetBounds(2, 7, 12, 7);
+
+  BtnPsTile := TButton.Create(pnlActs);     // 平铺全部 Windows Terminal 窗口
+  BtnPsTile.Parent := pnlActs;
+  BtnPsTile.Align := alRight;
+  BtnPsTile.Width := 108;
+  BtnPsTile.Caption := 'PowerShell快排';
+  BtnPsTile.OnClick := OnPsTileClick;
+  BtnPsTile.AlignWithMargins := True;
+  BtnPsTile.Margins.SetBounds(2, 7, 6, 7);
 
   BtnCmdTile := TButton.Create(pnlActs);
   BtnCmdTile.Parent := pnlActs;
@@ -1248,6 +1302,10 @@ var
   pnl: TPanel;
 begin
   if FAboutShown then Exit;                 // 已显示则不再处理
+  // 刚点掉小窗时鼠标还停在小窗原来的位置上, 此时 VCL 可能又补一个 MouseEnter 过来。
+  // 不挡住的话会出现"点一下关掉、立刻又弹回来", 看上去就像点击没用。
+  // 只在鼠标还停在小窗原位时挡; 鼠标一移开(或重新移回“关于”)就恢复正常。
+  if FAboutHideGuard and PtInRect(FAboutHideRect, Mouse.CursorPos) then Exit;
   if FAboutPopup = nil then
   begin
     path := IncludeTrailingPathDelimiter(ExtractFilePath(Application.ExeName))
@@ -1267,6 +1325,7 @@ begin
     FAboutPopup.OnMouseEnter := OnAboutPopupEnter;
     FAboutPopup.OnMouseLeave := OnAboutPopupLeave;
     FAboutPopup.OnClick := OnAboutPopupClick;
+    FAboutPopup.OnMouseDown := OnAboutPopupMouseDown;   // 点击兜底
 
     // 底部版本条: 构建号每次自增, 一眼看出是否已更新
     capH := 22;
@@ -1319,15 +1378,20 @@ begin
   mon := Screen.MonitorFromPoint(P);
   if mon <> nil then wa := mon.WorkareaRect else wa := Screen.WorkAreaRect;
 
-  FAboutPopup.Left := P.X - FAboutPopup.ClientWidth + LblAbout.Width + 8;
+  // 右缘与“关于”链接右缘对齐, 且上缘紧贴链接下缘 —— 中间不留空隙。
+  // 这一点很重要: 鼠标从链接移向图片时, 中间只要有几像素的空档, 就会在
+  // “既不在链接内也不在小窗内”的瞬间被巡检判为移出而把图片关掉, 用户根本
+  // 来不及移过去点击。贴着放, 鼠标垂直下移始终落在两者之一里面。
+  FAboutPopup.Left := P.X + LblAbout.Width - FAboutPopup.ClientWidth;
   if FAboutPopup.Left < wa.Left then FAboutPopup.Left := wa.Left + 4;
   if FAboutPopup.Left + FAboutPopup.ClientWidth > wa.Right then
     FAboutPopup.Left := wa.Right - FAboutPopup.ClientWidth - 4;
+  if FAboutPopup.Left < wa.Left then FAboutPopup.Left := wa.Left;
 
-  FAboutPopup.Top := P.Y + LblAbout.Height + 4;
+  FAboutPopup.Top := P.Y + LblAbout.Height;          // 紧贴链接下缘
   if FAboutPopup.Top + FAboutPopup.ClientHeight > wa.Bottom then
-    FAboutPopup.Top := P.Y - FAboutPopup.ClientHeight - 4;
-  if FAboutPopup.Top < wa.Top then FAboutPopup.Top := wa.Top + 4;
+    FAboutPopup.Top := P.Y - FAboutPopup.ClientHeight; // 下方放不下 → 贴链接上缘
+  if FAboutPopup.Top < wa.Top then FAboutPopup.Top := wa.Top;
 
   // 不抢焦点地显示
   SetWindowLong(FAboutPopup.Handle, GWL_EXSTYLE,
@@ -1335,7 +1399,13 @@ begin
   SetWindowPos(FAboutPopup.Handle, HWND_TOPMOST,
     FAboutPopup.Left, FAboutPopup.Top, FAboutPopup.Width, FAboutPopup.Height,
     SWP_SHOWWINDOW or SWP_NOACTIVATE);
+  // 关键: 用 SetWindowPos 显示**不会**更新 VCL 自己的 Visible 标志。不补这一句,
+  // 之后调用 Hide 时 VCL 认为"本来就不可见"而直接返回, 小窗永远关不掉。
+  // 窗口带 WS_EX_NOACTIVATE, 所以这里的显示不会抢焦点。
+  FAboutPopup.Visible := True;
   FAboutShown := True;
+  FAboutMiss := 0;
+  AboutTimer.Enabled := True;   // 启动巡检, 由它判断何时关闭
 end;
 
 procedure TMainForm.HideAboutPic;
@@ -1343,38 +1413,38 @@ begin
   AboutTimer.Enabled := False;
   if FAboutShown and (FAboutPopup <> nil) then
   begin
-    FAboutPopup.Hide;
+    FAboutHideRect := FAboutPopup.BoundsRect;     // 记住原位, 防止鼠标没动就立刻重新弹出
+    FAboutHideGuard := True;
+    FAboutPopup.Visible := False;                 // 同步 VCL 状态
+    if IsWindowVisible(FAboutPopup.Handle) then   // 兜底: 确保窗口真的隐藏
+      ShowWindow(FAboutPopup.Handle, SW_HIDE);
     FAboutShown := False;
   end;
 end;
 
 procedure TMainForm.OnAboutMouseEnter(Sender: TObject);
 begin
-  AboutTimer.Enabled := False;   // 正在查看, 取消延时关闭
-  ShowAboutPic;
+  ShowAboutPic;   // 显示收款码, 同时启动巡检计时器
 end;
 
 procedure TMainForm.OnAboutMouseLeave(Sender: TObject);
 begin
-  AboutTimer.Enabled := False;
-  AboutTimer.Enabled := True;    // 离开“关于”→ 300ms 后若无鼠标返回则关闭
+  AboutTimer.Enabled := True;   // 交给巡检判断: 鼠标确实不在链接/小窗内才关
 end;
 
 procedure TMainForm.OnAboutClick(Sender: TObject);
 begin
-  AboutTimer.Enabled := False;
   ShowAboutPic;
 end;
 
 procedure TMainForm.OnAboutPopupEnter(Sender: TObject);
 begin
-  AboutTimer.Enabled := False;   // 鼠标移到了图片上: 保持显示
+  AboutTimer.Enabled := True;   // 鼠标在小窗内 → 巡检会继续保持显示
 end;
 
 procedure TMainForm.OnAboutPopupLeave(Sender: TObject);
 begin
-  AboutTimer.Enabled := False;
-  AboutTimer.Enabled := True;    // 移出图片 → 延时关闭
+  AboutTimer.Enabled := True;
 end;
 
 procedure TMainForm.OnAboutPopupClick(Sender: TObject);
@@ -1382,8 +1452,40 @@ begin
   HideAboutPic;   // 点击图片(或小窗) → 立即关闭
 end;
 
-procedure TMainForm.OnAboutTimer(Sender: TObject);
+procedure TMainForm.OnAboutPopupMouseDown(Sender: TObject; Button: TMouseButton;
+  Shift: TShiftState; X, Y: Integer);
 begin
+  if Button = mbLeft then HideAboutPic;   // 点击兜底: 图片没收到点击时也能关
+end;
+
+{ 巡检计时器: 鼠标只要还在「关于」链接或收款码小窗内就继续保持显示, 否则关闭。
+  这里按鼠标位置判断, 而不是只靠 MouseEnter/MouseLeave 事件 —— 无窗口句柄的
+  子控件(图片)在跨窗口切换时可能收不到 Leave, 只靠事件会出现"关不掉"的情况。 }
+procedure TMainForm.OnAboutTimer(Sender: TObject);
+var
+  pt: TPoint;
+  link: TRect;
+begin
+  AboutTimer.Enabled := False;
+  if not (FAboutShown and (FAboutPopup <> nil)) then Exit;
+
+  pt := Mouse.CursorPos;   // 屏幕坐标
+  link := Rect(LblAbout.ClientOrigin.X, LblAbout.ClientOrigin.Y,
+               LblAbout.ClientOrigin.X + LblAbout.Width,
+               LblAbout.ClientOrigin.Y + LblAbout.Height);
+  if PtInRect(link, pt) or PtInRect(FAboutPopup.BoundsRect, pt) then
+  begin
+    FAboutMiss := 0;
+    AboutTimer.Enabled := True;   // 鼠标还在, 继续巡检
+    Exit;
+  end;
+  Inc(FAboutMiss);
+  // 连续 2 次(约 600ms)都不在链接/小窗内才关闭: 留出从链接移到图片上点击的时间
+  if FAboutMiss < 2 then
+  begin
+    AboutTimer.Enabled := True;
+    Exit;
+  end;
   HideAboutPic;
 end;
 
