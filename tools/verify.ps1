@@ -1,6 +1,7 @@
 ﻿# verify.ps1 - DeskTiler 功能自检(含: 两列布局, 目标显示器下拉, 全选复选框, 平铺后激活)
 # 全部在同一个 PowerShell 进程/桌面内完成, 保证窗口可被枚举。
-#   1) 界面元素: 一键全排/Cmd快排/PowerShell快排/目录快排/应用快排 按钮 + 顶部“全选”复选框 + 计数
+#   1) 界面元素: 一键全排/Cmd快排/PowerShell快排/目录快排/应用快排 按钮(含从左到右的顺序)
+#      + 顶部 全选/窗口置顶/本窗口置顶 复选框 + 计数
 #   2) 计数联动: 顶部“全选”复选框 打勾/取消 联动 “已选择”(BM_GETCHECK 校验状态)
 #   2b) 两列布局 & 显示器下拉: 表头列数==2(无 PID); TComboBox 下拉 >=2 且含 “自动选择”
 #   2c) 顶栏 5 个左侧控件顺序/不重叠(含新增的 窗口置顶 / 本窗口置顶)
@@ -151,6 +152,32 @@ if($h1 -ne [IntPtr]::Zero -and $h2 -ne [IntPtr]::Zero){
   Chk (($caps -contains '全选(&A)') -and ($caps -contains '自动刷新')) '顶部复选框: 全选 + 自动刷新 均存在'
   # 置顶控制(2026-09-17 新增): 窗口置顶(管勾选的目标窗口) + 本窗口置顶(管 DeskTiler 自己)
   Chk (($caps -contains '窗口置顶') -and ($caps -contains '本窗口置顶')) '顶部复选框: 窗口置顶 + 本窗口置顶 均存在'
+
+  # 底部快捷按钮行顺序(2026-09-17 调整: 应用快排 排到“一键全排”右侧, 成为最右端那个)
+  $actOrder = @('目录快排','PowerShell快排','Cmd快排','一键全排','应用快排')
+  $actRect = @{}
+  foreach($n in $actOrder){
+    $c = $kids | Where-Object { $_.Cap -eq $n } | Select-Object -First 1
+    if($c){ $actRect[$n] = Get-RectOf $c.Hwnd }
+  }
+  $afound = @($actOrder | Where-Object { $actRect.ContainsKey($_) })
+  Chk ($afound.Count -eq $actOrder.Count) ('底部 5 个快捷按钮齐全 ({0}/5)' -f $afound.Count)
+  if($afound.Count -eq $actOrder.Count){
+    foreach($n in $actOrder){ $rr=$actRect[$n]; Log ("  actbtn '{0}': L={1} R={2}" -f $n,$rr.L,$rr.R) }
+    $aord = $true
+    for($k=1;$k -lt $actOrder.Count;$k++){
+      if($actRect[$actOrder[$k]].L -le $actRect[$actOrder[$k-1]].L){ $aord = $false }
+    }
+    Chk $aord '快捷按钮从左到右 = 目录快排/PowerShell快排/Cmd快排/一键全排/应用快排(应用快排在最右)'
+    Chk ($actRect['应用快排'].R -gt $actRect['一键全排'].R) '“应用快排”确实排在“一键全排”右侧'
+    $aNoOv = $true
+    for($k=0;$k -lt $actOrder.Count;$k++){
+      for($j=$k+1;$j -lt $actOrder.Count;$j++){
+        if(Rects-Overlap $actRect[$actOrder[$k]] $actRect[$actOrder[$j]]){ $aNoOv = $false }
+      }
+    }
+    Chk $aNoOv '5 个快捷按钮两两不重叠'
+  }
 
   # ---- (2) 计数标签 & 联动 ----
   $stat = $kids | Where-Object { $_.Cap -like '窗口总数*' } | Select-Object -First 1

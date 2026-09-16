@@ -1230,9 +1230,9 @@ begin
   LblStatus.SetBounds(x, y, w, CH);
 end;
 
-{ 底部快捷按钮组: 从右往左依次摆 一键全排 / Cmd快排 / PowerShell快排 / 目录快排 / 应用快排,
-  所以从左往右看就是 应用快排 → 目录快排 → PowerShell快排 → Cmd快排 → 一键全排
-  (“一键全排”是兜底的那个, 始终排在最右端)。 }
+{ 底部快捷按钮组: 从右往左依次摆 应用快排 / 一键全排 / Cmd快排 / PowerShell快排 / 目录快排,
+  所以从左往右看就是 目录快排 → PowerShell快排 → Cmd快排 → 一键全排 → 应用快排
+  (“应用快排”排在最右端; “一键全排”紧挨在它左边)。 }
 procedure TMainForm.LayoutActButtons;
 const
   GAP = 6;      // 按钮之间的横向间隙
@@ -1255,11 +1255,11 @@ begin
   y := (pnlActs.ClientHeight - h) div 2;
   if y < 0 then y := 0;
   x := pnlActs.ClientWidth - RMARGIN;
+  Place(BtnAppTile, x, y, h);   Dec(x, GAP);   // 最右端
   Place(BtnAllTile, x, y, h);   Dec(x, GAP);
   Place(BtnCmdTile, x, y, h);   Dec(x, GAP);
   Place(BtnPsTile,  x, y, h);   Dec(x, GAP);
-  Place(BtnDirTile, x, y, h);   Dec(x, GAP);
-  Place(BtnAppTile, x, y, h);
+  Place(BtnDirTile, x, y, h);
 end;
 
 { ---------- 构造 UI ---------- }
@@ -1415,7 +1415,7 @@ begin
   pnlActs.BevelOuter := bvNone;
   pnlActs.Caption := '';
 
-  // 快捷按钮组: 从左到右 = 应用快排 / 目录快排 / PowerShell快排 / Cmd快排 / 一键全排。
+  // 快捷按钮组: 从左到右 = 目录快排 / PowerShell快排 / Cmd快排 / 一键全排 / 应用快排。
   // 位置由 LayoutActButtons 显式摆放, 不用 alRight 停靠 —— 同一个父容器里多个 alRight
   // 兄弟控件的停靠次序并不等于创建次序(实测对不上, 也正是“关于”链接被盖住那类坑的来源),
   // 显式算坐标才不会摆错。(创建次序无所谓, 摆放次序只看 LayoutActButtons。)
