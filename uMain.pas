@@ -73,6 +73,7 @@ type
     procedure OnAboutClick(Sender: TObject);
     procedure OnAboutPopupEnter(Sender: TObject);  // 鼠标进入收款码小窗: 保持显示
     procedure OnAboutPopupLeave(Sender: TObject);  // 移出收款码小窗: 延时关闭
+    procedure OnAboutPopupClick(Sender: TObject);  // 点击收款码图片 → 直接关闭
     procedure OnAboutTimer(Sender: TObject);       // 延时计时到点 → 关闭收款码
     procedure ShowAboutPic;                        // 创建小窗并显示收款码
     procedure HideAboutPic;                        // 关闭收款码小窗
@@ -1261,14 +1262,17 @@ begin
     FAboutPopup.DoubleBuffered := True;
     FAboutPopup.OnMouseEnter := OnAboutPopupEnter;
     FAboutPopup.OnMouseLeave := OnAboutPopupLeave;
+    FAboutPopup.OnClick := OnAboutPopupClick;
 
     img := TImage.Create(FAboutPopup);
     img.Parent := FAboutPopup;
     img.Align := alClient;
     img.Stretch := True;
+    img.Cursor := crHandPoint;      // 提示可点击
     img.Picture.LoadFromFile(path);
     img.OnMouseEnter := OnAboutPopupEnter;
     img.OnMouseLeave := OnAboutPopupLeave;
+    img.OnClick := OnAboutPopupClick;   // 点击图片即关闭
 
     // 等比缩放到合理大小, 避免图太大顶出屏幕
     w := img.Picture.Width;
@@ -1349,6 +1353,11 @@ procedure TMainForm.OnAboutPopupLeave(Sender: TObject);
 begin
   AboutTimer.Enabled := False;
   AboutTimer.Enabled := True;    // 移出图片 → 延时关闭
+end;
+
+procedure TMainForm.OnAboutPopupClick(Sender: TObject);
+begin
+  HideAboutPic;   // 点击图片(或小窗) → 立即关闭
 end;
 
 procedure TMainForm.OnAboutTimer(Sender: TObject);
