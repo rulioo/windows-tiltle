@@ -171,8 +171,8 @@ if($h1 -ne [IntPtr]::Zero -and $h2 -ne [IntPtr]::Zero){
   # 置顶控制(2026-09-17 新增): 选定窗口置顶(管勾选的目标窗口) + 本窗口置顶(管 DeskTiler 自己)
   Chk (($caps -contains '选定窗口置顶') -and ($caps -contains '本窗口置顶')) '顶部复选框: 选定窗口置顶 + 本窗口置顶 均存在'
 
-  # 底部快捷按钮行顺序(2026-09-17 调整: 应用快排 排到“一键全排”右侧, 成为最右端那个)
-  $actOrder = @('目录快排','PowerShell快排','Cmd快排','一键全排','应用快排')
+  # 底部快捷按钮行顺序(2026-09-17 调整: “一键全排”放到最右端, “应用快排”紧挨在它左边)
+  $actOrder = @('目录快排','PowerShell快排','Cmd快排','应用快排','一键全排')
   $actRect = @{}
   foreach($n in $actOrder){
     $c = $kids | Where-Object { $_.Cap -eq $n } | Select-Object -First 1
@@ -186,8 +186,8 @@ if($h1 -ne [IntPtr]::Zero -and $h2 -ne [IntPtr]::Zero){
     for($k=1;$k -lt $actOrder.Count;$k++){
       if($actRect[$actOrder[$k]].L -le $actRect[$actOrder[$k-1]].L){ $aord = $false }
     }
-    Chk $aord '快捷按钮从左到右 = 目录快排/PowerShell快排/Cmd快排/一键全排/应用快排(应用快排在最右)'
-    Chk ($actRect['应用快排'].R -gt $actRect['一键全排'].R) '“应用快排”确实排在“一键全排”右侧'
+    Chk $aord '快捷按钮从左到右 = 目录快排/PowerShell快排/Cmd快排/应用快排/一键全排(一键全排在最右)'
+    Chk ($actRect['一键全排'].R -gt $actRect['应用快排'].R) '“一键全排”确实排在“应用快排”右侧(最右端)'
     $aNoOv = $true
     for($k=0;$k -lt $actOrder.Count;$k++){
       for($j=$k+1;$j -lt $actOrder.Count;$j++){
