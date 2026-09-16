@@ -1431,7 +1431,7 @@ begin
   LblMsg.Height := 22;
   LblMsg.AutoSize := False;
   LblMsg.Color := clBtnFace;
-  LblMsg.Caption := '提示: 点表头可排序; 勾选窗口后点“平铺排列”, 或点“一键全排”重排全部窗口。';
+  LblMsg.Caption := '提示: 点表头可排序; 勾选窗口后点“平铺所选应用”, 或点“一键全排”重排全部窗口。';
   LblMsg.AlignWithMargins := True;
   LblMsg.Margins.SetBounds(12, 0, 8, 0);
 
@@ -1579,12 +1579,13 @@ begin
   CmbMon.Margins.SetBounds(0, 8, 4, 8);
   RefreshMonitors;   // 初始填入 “自动” + 当前每台显示器
 
-  // 平铺排列(&T): 与参数(列数/间距/显示器)同一行, 靠右放 —— 主按钮, 醒目且不占快捷按钮行
+  // 平铺所选应用(&T): 与参数(列数/间距/显示器)同一行, 靠右放 —— 主按钮, 醒目且不占快捷按钮行。
+  // 动作仍是“把列表里勾选的那些窗口平铺开”, 只是改了个说得更明白的名字(原来叫“平铺排列”)。
   BtnTile := TButton.Create(pnlOpts);
   BtnTile.Parent := pnlOpts;
   BtnTile.Align := alRight;
-  BtnTile.Width := 118;
-  BtnTile.Caption := '平铺排列(&T)';
+  BtnTile.Width := 158;   // 6 个汉字 + (&T), 粗体; 比原来的“平铺排列”多两个字, 118 -> 158
+  BtnTile.Caption := '平铺所选应用(&T)';
   BtnTile.Default := True;
   BtnTile.OnClick := OnTileClick;
   BtnTile.Font.Style := [fsBold];

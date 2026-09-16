@@ -73,12 +73,13 @@ function EX-TopMost($h){ return (([VW]::GetWindowLongW($h,-20)) -band 0x00000008
 # 文字在“窗体那套字体”(Microsoft YaHei UI 9pt)下的像素宽 —— 走的也是 GDI 度量,
 # 与程序内 Self.Canvas.TextWidth 同一套算法, 所以“按钮够不够宽装下这行字”可以直接断言。
 # (本机 100% 缩放: 顶栏按钮实测宽度与代码里写的 80/86/92/126/108 一模一样, 9pt 即 12px。)
-function Measure-Text($s){
+function Measure-Text($s,$bold = $false){
   Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
   Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
   $f = $null; $bmp = $null; $gfx = $null
   try {
-    $f = New-Object System.Drawing.Font('Microsoft YaHei UI',9)
+    $style = if($bold){ [System.Drawing.FontStyle]::Bold } else { [System.Drawing.FontStyle]::Regular }
+    $f = New-Object System.Drawing.Font('Microsoft YaHei UI',9,$style)
     $bmp = New-Object System.Drawing.Bitmap 1,1
     $gfx = [System.Drawing.Graphics]::FromImage($bmp)
     $flags = [System.Windows.Forms.TextFormatFlags]::NoPadding
@@ -166,7 +167,25 @@ if($h1 -ne [IntPtr]::Zero -and $h2 -ne [IntPtr]::Zero){
   # 目录快排/应用快排: 2026-09-17 按用户要求新增的第 4、5 个快捷按钮
   Chk ($caps -contains '目录快排') '目录快排 按钮存在(平铺全部 explorer 窗口)'
   Chk ($caps -contains '应用快排') '应用快排 按钮存在(平铺列表中选中那行所属应用的全部窗口)'
-  Chk ($caps -contains '平铺排列(&T)') '原有按钮: 平铺排列(&T) 存在'
+  # 主按钮 2026-09-17 由「平铺排列(&T)」改名为「平铺所选应用(&T)」(动作不变: 平铺勾选的那些窗口)
+  Chk ($caps -contains '平铺所选应用(&T)') '主按钮: 平铺所选应用(&T) 存在(由“平铺排列”改名而来)'
+  $btnTile = $kids | Where-Object { $_.Cap -eq '平铺所选应用(&T)' } | Select-Object -First 1
+  if($btnTile){
+    # 名字长了两个字(还带粗体的 "(&T)"), 宽度必须跟着加宽, 否则文字会被截掉 —— 按同一字体量一遍
+    $rt = Get-RectOf $btnTile.Hwnd
+    $wt = $rt.R - $rt.L
+    $needT = Measure-Text '平铺所选应用(&T)' $true
+    Log ("  main btn W={0} (L={1} R={2}); bold text needs {3}px" -f $wt,$rt.L,$rt.R,$needT)
+    Chk ($needT -gt 0 -and $wt -ge $needT + 6) ('主按钮够宽: 粗体文字 {0}px + 留白 <= 按钮 {1}px' -f $needT,$wt)
+    # 加宽后不能压到左边那排选择框(列数/间距/显示器 都在同一行, 左停靠, 主按钮右停靠)
+    $leftMax = 0
+    foreach($c in ($kids | Where-Object { $_.Cls -eq 'TComboBox' })){
+      $rc = Get-RectOf $c.Hwnd
+      if($rc.R -gt $leftMax){ $leftMax = $rc.R }
+    }
+    Log ("  main btn L={0} vs left-most right edge (combos) = {1}" -f $rt.L,$leftMax)
+    Chk ($rt.L -gt $leftMax) ('主按钮加宽后没有压住左边的选择框 (按钮左缘 {0} > 下拉右缘 {1})' -f $rt.L,$leftMax)
+  } else { Chk $false '主按钮「平铺所选应用(&T)」未找到' }
   Chk (($caps -contains '全选(&A)') -and ($caps -contains '自动刷新')) '顶部复选框: 全选 + 自动刷新 均存在'
   # 置顶控制(2026-09-17 新增): 选定窗口置顶(管勾选的目标窗口) + 本窗口置顶(管 DeskTiler 自己)
   Chk (($caps -contains '选定窗口置顶') -and ($caps -contains '本窗口置顶')) '顶部复选框: 选定窗口置顶 + 本窗口置顶 均存在'
