@@ -11,7 +11,8 @@ uses
   System.Generics.Defaults, System.Types,
   Winapi.Windows, Winapi.Messages,
   Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ComCtrls, Vcl.ExtCtrls,
-  Vcl.Graphics, Vcl.Samples.Spin, Vcl.Imaging.jpeg;
+  Vcl.Graphics, Vcl.Samples.Spin, Vcl.Imaging.jpeg,
+  Vcl.Menus;                // 列表右键菜单
 
 type
   HMONITOR = NativeUInt;
@@ -60,6 +61,20 @@ type
                                 // 不能用 Lv.Selected 现取 —— 列表每 2.5 秒自动刷新时会 Clear 重建,
                                 // 选中行会被抹掉; 而且点完行还要把鼠标移到按钮上, 中间早就刷新过了。
 
+    // 列表右键菜单(结束进程 / 转到应用)
+    MnuList: TPopupMenu;
+    MiKill, MiGoto: TMenuItem;
+    // 右键选中的目标。存的是**值**不是 TListItem: 菜单弹出的那段时间里,
+    // 2.5 秒一次的自动刷新(以及弹确认框时仍在派发的计时器消息)随时可能整表重建,
+    // 存行对象就会变成野指针。
+    FMenuHwnd: HWND;
+    FMenuPid: DWORD;
+    FMenuApp: string;
+    // 右键按下的位置(列表客户端坐标)。OnPopup 拿不到坐标, 所以在这里先接住 ——
+    // 消息里带的坐标是可靠的; 而 Mouse.CursorPos 对合成消息和键盘唤出的菜单都不作数。
+    FPopupPt: TPoint;
+    FPopupPtValid: Boolean;
+
     procedure BuildUI;
     procedure RefreshApps;
     procedure UpdateStatus;
@@ -84,6 +99,12 @@ type
     procedure OnListChange(Sender: TObject; Item: TListItem; Change: TItemChange);
     procedure OnListClicked(Sender: TObject);
     procedure OnListSelectItem(Sender: TObject; Item: TListItem; Selected: Boolean);
+    procedure OnListMouseDown(Sender: TObject; Button: TMouseButton;
+      Shift: TShiftState; X, Y: Integer);          // 记下右键按在哪一行
+    procedure OnListPopup(Sender: TObject);        // 右键菜单弹出前: 把目标锁定到光标下那一行
+    procedure OnKillProcessClick(Sender: TObject); // 结束进程: 强制结束该行窗口所属的进程(先确认)
+    procedure OnGotoAppClick(Sender: TObject);     // 转到应用: 还原并激活该行窗口
+    procedure KillProcessAt(const APid: DWORD; const AApp: string);
     procedure OnFormResize(Sender: TObject);
     procedure OnMonDropDown(Sender: TObject);   // 展开显示器下拉时刷新监视器列表(热插拔)
 
@@ -1186,6 +1207,145 @@ begin
   end;
 end;
 
+{ 右键按下就记下坐标: 菜单弹出时 OnPopup 不带坐标, 只能靠这个。 }
+procedure TMainForm.OnListMouseDown(Sender: TObject; Button: TMouseButton;
+  Shift: TShiftState; X, Y: Integer);
+begin
+  if Button = mbRight then
+  begin
+    FPopupPt := Point(X, Y);
+    FPopupPtValid := True;
+  end;
+end;
+
+{ 右键菜单弹出前, 把操作目标锁定到光标底下的那一行, 并把两项菜单按有无目标置灰/点亮。
+  右键顺带把该行选中(跟资源管理器一致), 于是「应用快排」的名字也跟着走 ——
+  否则“右键一行、菜单却作用在另一行上”会很难解释。 }
+procedure TMainForm.OnListPopup(Sender: TObject);
+var
+  p: TPoint;
+  it: TListItem;
+  h: HWND;
+  pid: DWORD;
+begin
+  FMenuHwnd := 0;
+  FMenuPid := 0;
+  FMenuApp := '';
+  if Lv = nil then
+    Exit;
+
+  if FPopupPtValid then
+    p := FPopupPt                    // 右键按下的位置(可靠)
+  else
+    p := Lv.ScreenToClient(Mouse.CursorPos);   // 说不清来源时, 退回光标当前位置
+  FPopupPtValid := False;
+  it := Lv.GetItemAt(p.X, p.Y);
+  // 光标不在列表上(例如 Shift+F10 从键盘唤出菜单)时退回当前选中行;
+  // 但光标就停在列表的空白处时不猜 —— 那种情况下两项都置灰, 免得误伤别的窗口。
+  if (it = nil) and not PtInRect(Lv.ClientRect, p) then
+    it := Lv.Selected;
+
+  if it <> nil then
+  begin
+    h := HWND(NativeUInt(it.Data));
+    if IsWindow(h) then   // 列表是 2.5 秒前的快照, 窗口可能已经关了
+    begin
+      pid := 0;
+      GetWindowThreadProcessId(h, @pid);
+      FMenuHwnd := h;
+      FMenuPid := pid;
+      FMenuApp := it.Caption;
+      if not it.Selected then
+        it.Selected := True;
+      FSelectedApp := it.Caption;
+      UpdateAppTileButton;
+    end;
+  end;
+
+  MiKill.Enabled := (FMenuHwnd <> 0) and (FMenuPid <> 0);
+  MiGoto.Enabled := FMenuHwnd <> 0;
+end;
+
+{ 结束进程: 强制结束右键那一行的窗口所属的进程。
+   是 TerminateProcess(硬杀), 不是先发 WM_CLOSE 等它自己退 —— 菜单项写的就是“结束进程”,
+   所以确认框里把“未保存的数据会丢失”说清楚。 }
+procedure TMainForm.OnKillProcessClick(Sender: TObject);
+var
+  pid: DWORD;
+  msg: string;
+begin
+  if FMenuPid = 0 then
+  begin
+    LblMsg.Caption := '这一行对应的窗口已经关掉了';
+    Exit;
+  end;
+
+  // 用原生 MessageBox 而不是 VCL 的 MessageDlg: 前者的正文是有句柄的 Static,
+  // 自动化校验能读到“到底要杀谁”(VCL 那个正文是 windowless 的 TLabel, 读不出来);
+  // MB_DEFBUTTON2 = 默认落在“否”上, 直接回车不会误杀。
+  msg := Format('确定要强制结束 %s (PID %d) 吗？'#13#10#13#10 +
+                '该进程里没保存的数据会丢失。', [FMenuApp, FMenuPid]);
+  if MessageBox(Handle, PChar(msg), '结束进程',
+       MB_YESNO or MB_ICONWARNING or MB_DEFBUTTON2) <> IDYES then
+  begin
+    LblMsg.Caption := '已取消';
+    Exit;
+  end;
+
+  // 弹确认框的这几秒里世界还在变: 那一行的窗口可能已经关掉, 甚至这个 PID 已经被
+  // 新进程复用。杀之前再核对一次 PID, 确认要杀的还是当初右键的那个进程。
+  pid := 0;
+  if (FMenuHwnd <> 0) and IsWindow(FMenuHwnd) then
+    GetWindowThreadProcessId(FMenuHwnd, @pid);
+  if pid <> FMenuPid then
+  begin
+    LblMsg.Caption := Format('%s (PID %d) 已经不在了, 没有结束任何进程', [FMenuApp, FMenuPid]);
+    RefreshApps;
+    Exit;
+  end;
+
+  KillProcessAt(FMenuPid, FMenuApp);
+end;
+
+{ 强制结束指定进程; 成功与否都写到底部提示条上(失败不弹窗)。 }
+procedure TMainForm.KillProcessAt(const APid: DWORD; const AApp: string);
+var
+  h: THandle;
+begin
+  if APid = 0 then
+    Exit;
+  h := OpenProcess(PROCESS_TERMINATE, False, APid);
+  if h = 0 then
+  begin
+    // 最常见的就是权限: 对方以管理员身份运行, 普通权限的我们杀不动
+    LblMsg.Caption := Format('结束 %s (PID %d) 失败: 权限不足(对方可能以管理员身份运行)',
+      [AApp, APid]);
+    Exit;
+  end;
+  try
+    if TerminateProcess(h, 0) then
+      LblMsg.Caption := Format('已结束 %s (PID %d)', [AApp, APid])
+    else
+      LblMsg.Caption := Format('结束 %s (PID %d) 失败: 错误码 %d', [AApp, APid, GetLastError]);
+  finally
+    CloseHandle(h);
+  end;
+  RefreshApps;   // 立刻重建列表, 不用等下一次自动刷新
+end;
+
+{ 转到应用: 把该行窗口还原(若最小化)并激活到最前。
+   直接复用平铺收尾用的那个 ActivateWindow —— 它已经处理了 Windows 的前台锁。 }
+procedure TMainForm.OnGotoAppClick(Sender: TObject);
+begin
+  if (FMenuHwnd = 0) or not IsWindow(FMenuHwnd) then
+  begin
+    LblMsg.Caption := '这一行对应的窗口已经关掉了';
+    Exit;
+  end;
+  ActivateWindow(FMenuHwnd);
+  LblMsg.Caption := Format('已转到 %s', [FMenuApp]);
+end;
+
 { 「应用快排」按钮的字样与宽度跟着选中的应用走:
    选中 explorer 那行 -> 按钮显示「explorer快排」; 没选过任何行时是「应用快排」。
    宽度按实际文字量算出来(而不是写死), 这样 explorer、WindowsTerminal 这类长名字也显示得下。
@@ -1415,6 +1575,7 @@ begin
   Lv.OnChange := OnListChange;
   Lv.OnClick := OnListClicked;
   Lv.OnSelectItem := OnListSelectItem;   // 记录选中的应用程序(供“应用快排”)
+  Lv.OnMouseDown := OnListMouseDown;     // 记下右键按在哪一行(供右键菜单)
   Lv.OnColumnClick := OnColumnClick;
 
   col := Lv.Columns.Add;
@@ -1424,6 +1585,21 @@ begin
   col.Caption := '窗口标题';
   col.Width := Self.ClientWidth - 130 - 4; // 占位; OnFormResize 会按宽度撑满
 
+  // ---- 列表右键菜单: 结束进程 / 转到应用 ----
+  // 目标由 OnListPopup 在弹出前锁定到光标下那一行(存 HWND/PID 值, 不存行对象)
+  MnuList := TPopupMenu.Create(Self);
+  MiKill := TMenuItem.Create(MnuList);
+  MiKill.Caption := '结束进程(&K)';
+  MiKill.OnClick := OnKillProcessClick;
+  MnuList.Items.Add(MiKill);
+  MiGoto := TMenuItem.Create(MnuList);
+  MiGoto.Caption := '转到应用(&G)';
+  MiGoto.Default := True;   // 加粗: 这一项不动数据, 让它当默认那一个
+  MiGoto.OnClick := OnGotoAppClick;
+  MnuList.Items.Add(MiGoto);
+  MnuList.OnPopup := OnListPopup;
+  Lv.PopupMenu := MnuList;
+
   // ---- 底部: 操作结果/提示条(最先创建 => 位于最底部) ----
   LblMsg := TStaticText.Create(Self);
   LblMsg.Parent := Self;
@@ -1431,7 +1607,7 @@ begin
   LblMsg.Height := 22;
   LblMsg.AutoSize := False;
   LblMsg.Color := clBtnFace;
-  LblMsg.Caption := '提示: 点表头可排序; 勾选窗口后点“平铺所选应用”, 或点“一键全排”重排全部窗口。';
+  LblMsg.Caption := '提示: 点表头可排序; 勾选窗口后点“平铺所选应用”或“一键全排”; 右键列表某行可结束进程/转到应用。';
   LblMsg.AlignWithMargins := True;
   LblMsg.Margins.SetBounds(12, 0, 8, 0);
 

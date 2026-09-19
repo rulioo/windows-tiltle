@@ -7,9 +7,16 @@
 #   2c) 顶栏 5 个左侧控件顺序/不重叠(含 选定窗口置顶 / 本窗口置顶)
 #   2d) 置顶行为: 选定窗口置顶 -> 目标窗口 WS_EX_TOPMOST 置位/清除; 本窗口置顶 -> 主窗体自身置位/清除
 #   2e) 点选列表一行: 「应用快排」按钮改名为「<应用名>快排」并按文字加宽(文字量得下 + 底行重排不错位)
+#   2f) 列表右键菜单: 右键某行弹出「结束进程/转到应用」两项;
+#       结束进程 -> 原生确认框点名应用与 PID, 点「否」不杀(进程仍在), 点「是」真杀(进程退出);
+#       转到应用 -> 该行窗口被激活到前台。这一段自己起一个新实例当靶子, 只动自己造的进程。
 #   3) 表头排序: -sorttest 在程序内按 PID/应用 升序/降序各排一次(真实 SortList 路径)
 #   4) -tileapp DeskTiler 平铺两个目标 -> 校验为均分网格(等大、不相交、相邻)
 #   说明: 本机单显示器, 手动指定屏的“跨屏平铺”无法自动化; 覆盖控件存在 + 自动兜底路径
+#   说明: (2f) 用真光标 + 真鼠标事件驱动原生菜单(它的模态循环不认 PostMessage 造的鼠标消息),
+#         落点前用 WindowFromPoint 确认底下就是被测程序自己的列表/菜单, 不是就不点; 结束后还原光标。
+#         落点用**客户区原点**算(窗口矩形含 2px 边框, 直接拿它当客户区原点会偏 2px),
+#         并且挑行的中间而不是上边缘 —— 行顶就是行边界, 偏一点点就落到上一行去了。
 $ErrorActionPreference = 'Continue'
 $exe = 'E:\cc\windows-tiltle\DeskTiler.exe'
 $log = 'E:\cc\windows-tiltle\verify.log'
@@ -25,10 +32,25 @@ using System;
 using System.Text;
 using System.Runtime.InteropServices;
 public struct VERECT { public int L,T,R,B; }
+public struct VEPT { public int X,Y; }
 public class VW {
   public delegate bool ChildEnum(IntPtr h, IntPtr l);
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr p, ChildEnum cb, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  // 右键菜单是原生弹出菜单(#32768), 它的模态循环按“真实光标位置”跟踪,
+  // PostMessage 造的鼠标消息它不认 —— 只能喂真光标 + 真鼠标事件。
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern bool GetCursorPos(out VEPT p);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, uint d, IntPtr e);
+  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(VEPT p);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h, int id);
+  [DllImport("user32.dll")] public static extern int GetMenuItemCount(IntPtr m);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out VERECT r);
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out VERECT r);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextLengthW(IntPtr h);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
@@ -64,6 +86,16 @@ function Get-RectOf($h){
   $r = New-Object VERECT
   [void][VW]::GetWindowRect($h,[ref]$r)
   return $r
+}
+# 客户区左上角的屏幕坐标。窗口矩形**不等于**客户区: 列表有 2px 边框, 用窗口矩形去算
+# 屏幕落点, 真点击落进客户区时会比验证过的 y 少 2 —— 踩着行边界就翻到上一行去了。
+# 边框按对称算((窗口宽 - 客户宽)/2), 标准边框都成立。
+function Get-ClientOrigin($h){
+  $r = New-Object VERECT; [void][VW]::GetWindowRect($h,[ref]$r)
+  $c = New-Object VERECT; [void][VW]::GetClientRect($h,[ref]$c)
+  $bx = [int](($r.R - $r.L - $c.R) / 2)
+  $by = [int](($r.B - $r.T - $c.B) / 2)
+  return ,@(($r.L + $bx),($r.T + $by))
 }
 # 两个矩形是否相交(边贴边不算)
 function Rects-Overlap($a,$b){
@@ -109,6 +141,87 @@ function Start-Run($argsStr){
   $q = [System.Diagnostics.Process]::Start($psi)
   $q.WaitForExit()
   return $q.ExitCode
+}
+
+# ---- 顶层窗口查找(按类名; 原生弹出菜单 #32768 / 消息框 #32770 都是顶层窗口) ----
+function Find-TopWindow($cls){
+  $script:foundH = [IntPtr]::Zero
+  $cb = { param($h,$l)
+    if($script:foundH -ne [IntPtr]::Zero){ return $true }
+    if([VW]::IsWindowVisible($h)){
+      $sb = New-Object System.Text.StringBuilder 128
+      [void][VW]::GetClassNameW($h,$sb,128)
+      if($sb.ToString() -eq $cls){ $script:foundH = $h }
+    }
+    return $true }
+  $script:gTop = [Runtime.InteropServices.GCHandle]::Alloc($cb)
+  try { [void][VW]::EnumWindows($cb,[IntPtr]::Zero) } finally { $script:gTop.Free() }
+  return $script:foundH
+}
+function To-Pt($x,$y){ $p = New-Object VEPT; $p.X=[int]$x; $p.Y=[int]$y; return $p }
+# 真光标 + 真鼠标事件(不是 PostMessage): 原生菜单只认真实输入
+function Real-Click($x,$y,$right){
+  [void][VW]::SetCursorPos([int]$x,[int]$y)
+  Start-Sleep -Milliseconds 200
+  if($right){
+    [VW]::mouse_event(0x0008,0,0,0,[IntPtr]::Zero); Start-Sleep -Milliseconds 80
+    [VW]::mouse_event(0x0010,0,0,0,[IntPtr]::Zero)
+  } else {
+    [VW]::mouse_event(0x0002,0,0,0,[IntPtr]::Zero); Start-Sleep -Milliseconds 80
+    [VW]::mouse_event(0x0004,0,0,0,[IntPtr]::Zero)
+  }
+}
+# 在列表某行上右键唤出菜单, 返回菜单窗口句柄(0 = 没弹出来)。
+# 参数是**客户端** y(行号换算出来的, 窗口怎么挪都不变); 屏幕坐标必须用客户区原点现算 ——
+# 踩过两个坑: 一是缓存了旧的 rect, 二是拿窗口矩形当客户区原点(差 2px 边框),
+# 两次都让真右键按到了上一行(菜单里点名的成了 Weixin 而不是靶子)。
+function Open-RowMenu($clientY){
+  $o = Get-ClientOrigin $script:hLv
+  $rowX = $o[0] + 60
+  $rowY = $o[1] + $clientY
+  # 安全闸: 落点必须真的在被测程序自己的列表上。被别的窗口盖住就宁可不动手 ——
+  # 真鼠标一点下去是会打到盖在上面那个窗口上的。
+  $hit = [VW]::WindowFromPoint((To-Pt $rowX $rowY))
+  if($hit -ne $script:hLv){
+    $null = Log ("  row point ({0},{1}) is covered by hwnd={2} (listview={3}) -> abort menu" -f $rowX,$rowY,([int64]$hit),([int64]$script:hLv))
+    return [IntPtr]::Zero
+  }
+  # 退到前台这一步在别的进程抢焦点时可能失败(Win 的前台锁), 失败时那一下右键就只够把窗口激活、
+  # 不会弹菜单 —— 所以按“再点一次”处理: 最多试三轮, 每轮都把当次的前台窗口记下来。
+  for($try=1; $try -le 3; $try++){
+    [void][VW]::SetForegroundWindow($script:hMain)
+    Start-Sleep -Milliseconds 350
+    if($try -eq 1){ $null = Log ("  foreground before right-click: {0} (driver {1})" -f ([int64][VW]::GetForegroundWindow()),([int64]$script:hMain)) }
+    Real-Click $rowX $rowY $true
+    for($k=0; $k -lt 8; $k++){
+      Start-Sleep -Milliseconds 200
+      $m = Find-TopWindow '#32768'
+      if($m -ne [IntPtr]::Zero){ return $m }
+    }
+    $null = Log ("  right-click attempt {0}: no menu (fg={1})" -f $try,([int64][VW]::GetForegroundWindow()))
+    Start-Sleep -Milliseconds 250
+  }
+  return [IntPtr]::Zero
+}
+# 点菜单里的第 frac 段(两项时: 0.25=第一项 0.75=第二项)
+function Click-MenuItem($m,$frac){
+  $mr = Get-RectOf $m
+  $x = [int]($mr.L + ($mr.R-$mr.L)/2)
+  $y = [int]($mr.T + ($mr.B-$mr.T)*$frac)
+  $hit = [VW]::WindowFromPoint((To-Pt $x $y))
+  if($hit -ne $m){
+    $null = Log ("  menu item point ({0},{1}) hit hwnd={2}, not the menu {3} -> abort click" -f $x,$y,([int64]$hit),([int64]$m))
+    return $false
+  }
+  Real-Click $x $y $false
+  Start-Sleep -Milliseconds 900
+  return $true
+}
+# 读原生消息框的正文(它的正文是有句柄的 Static, 跨进程读得到; VCL 的 MessageDlg 就读不到)
+function Get-DialogText($dlg){
+  $st = @(Get-ChildInfo $dlg) | Where-Object { $_.Cls -eq 'Static' -and $_.Cap -ne '' } | Select-Object -First 1
+  if($st){ return $st.Cap }
+  return ''
 }
 
 # ============ 清理历史 DeskTiler 实例(只保留两个不可杀死的无窗僵尸) ============
@@ -158,6 +271,7 @@ if($h1 -ne [IntPtr]::Zero -and $h2 -ne [IntPtr]::Zero){
     $kids = Get-ChildInfo $h1
     Log 'forced re-enumeration (刷新) so both targets are in the list'
   } else { Log 'WARN: 刷新按钮未找到' }
+  $p2.Refresh(); Log ("[diag] 第二个实例存活 @刷新后 = " + (-not $p2.HasExited))
 
   # ---- (1) 快捷按钮 & 顶部复选框 ----
   $caps = @($kids | ForEach-Object { $_.Cap })
@@ -314,6 +428,7 @@ if($h1 -ne [IntPtr]::Zero -and $h2 -ne [IntPtr]::Zero){
   $chkSelf = $kids | Where-Object { $_.Cap -eq '本窗口置顶' } | Select-Object -First 1
   $msg = $kids | Where-Object { $_.Cls -eq 'TStaticText' -and $_.Cap -notlike '窗口总数*' } | Select-Object -First 1
   Log ("prereq: chkTop={0} chkSelf={1} msg={2}" -f $(if($chkTop){'y'}else{'n'}),$(if($chkSelf){'y'}else{'n'}),$(if($msg){'y'}else{'n'}))
+  $p2.Refresh(); Log ("[diag] 第二个实例存活 @2d前 = " + (-not $p2.HasExited))
   if($chkTop -and $chkSelf){
     $BM_CLICK   = 0x00F5
     $BM_GETCHK  = 0x00F0
@@ -357,6 +472,7 @@ if($h1 -ne [IntPtr]::Zero -and $h2 -ne [IntPtr]::Zero){
     Chk (-not (EX-TopMost $h1)) '取消“本窗口置顶”: 主窗体恢复普通层级'
   }
 
+  $p2.Refresh(); Log ("[diag] 第二个实例存活 @2d后 = " + (-not $p2.HasExited))
   # ---- (2e) 在列表里点选一行 -> 「应用快排」按钮改名为「应用名+快排」并按文字加宽(2026-09-17 用户要求) ----
   if($lv){
     $btnApp = $kids | Where-Object { $_.Cap -eq '应用快排' } | Select-Object -First 1
@@ -424,6 +540,7 @@ if($h1 -ne [IntPtr]::Zero -and $h2 -ne [IntPtr]::Zero){
 }
 
 # ============ (3) 表头排序自检(SortList 升降序, 程序内执行, 无跨进程读内存) ============
+$p2.Refresh(); Log ("[diag] 第二个实例存活 @2e后 = " + (-not $p2.HasExited))
 Log '== run -sorttest =='
 Start-Run "-sorttest `"$sortFile`""
 if(Test-Path $sortFile){
@@ -471,6 +588,7 @@ if(Test-Path $sortFile){
 } else { Chk $false 'sorttest 未生成文件' }
 
 # ============ (4) -tileapp 平铺两个 DeskTiler 目标 -> 均分网格 ============
+$p2.Refresh(); Log ("[diag] 第二个实例存活 @sorttest后 = " + (-not $p2.HasExited))
 Log '== run -tileapp DeskTiler =='
 Start-Run "-tileapp DeskTiler"
 Start-Sleep -Milliseconds 600
@@ -494,8 +612,177 @@ elseif($r0.L -eq $r1b.L -and $r0.R -eq $r1b.R){ $gap=$r1b.T-$r0.B; if($gap -ge 0
 else { Log 'orientation neither pure-row nor pure-col' }
 Chk $adj '两窗口相邻成 1×2 或 2×1 网格'
 
+# ============ (2f) 列表右键菜单: 「结束进程」/「转到应用」 ============
+# 放在 (4) 之后: 这一段会把第二个实例真的杀掉, 不能影响前面还要用到它的断言。
+# 被杀的都是本脚本自己起的实例($p2), 不碰机器上任何别人的进程。
+Log '== (2f) list context menu =='
+$script:hMain = $h1
+$script:hLv   = $lv
+
+# 逐行点选, 看「应用快排」按钮是否变成「DeskTiler快排」—— 那就是第二个实例所在的行。
+# (列表里读不到文字, 但按钮改名是可以跨进程读的; 驱动实例不把自己列进自己的表, 所以只有一行是它。)
+function Find-VictimRow($btnTile,$lv){
+  $nItems = [int64][VW]::SendMessageW($lv,0x1004,[IntPtr]::Zero,[IntPtr]::Zero)
+  for($k=0; $k -lt [Math]::Min($nItems,12); $k++){
+    $rowY = -1
+    foreach($cand in @(($k*20+32),($k*20+27),($k*20+37))){
+      $lp = [IntPtr]((([int]$cand) -shl 16) -bor 60)
+      [void][VW]::PostMessageW($lv,0x0201,[IntPtr]1,$lp)          # WM_LBUTTONDOWN
+      [void][VW]::PostMessageW($lv,0x0202,[IntPtr]::Zero,$lp)     # WM_LBUTTONUP
+      Start-Sleep -Milliseconds 220
+      if(([int64][VW]::SendMessageW($lv,0x100C,[IntPtr](-1),[IntPtr]2)) -eq $k){ $rowY=$cand; break }  # LVM_GETNEXTITEM/LVNI_SELECTED
+    }
+    if($rowY -lt 0){ continue }
+    $rc = Get-Cap $btnTile.Hwnd
+    $null = Log ("  row {0} (client y={1}) -> '{2}'" -f $k,$rowY,$rc)
+    if($rc -eq 'DeskTiler快排'){ return $rowY }
+  }
+  return -1
+}
+
+# 投递一下左键, 反查应用眼里的这一行是谁 —— 「应用快排」按钮会改名为「<应用名>快排」。
+# 投递的左键走的是客户端坐标, 窗口挪到哪儿都不影响。
+function Get-RowNameAt($btnTile,$lv,$clientY){
+  $lp = [IntPtr]((([int]$clientY) -shl 16) -bor 60)
+  [void][VW]::PostMessageW($lv,0x0201,[IntPtr]1,$lp)
+  [void][VW]::PostMessageW($lv,0x0202,[IntPtr]::Zero,$lp)
+  Start-Sleep -Milliseconds 220
+  return (Get-Cap $btnTile.Hwnd)
+}
+function Test-VictimRow($btnTile,$lv,$clientY){
+  return ((Get-RowNameAt $btnTile $lv $clientY) -eq 'DeskTiler快排')
+}
+
+# 找行找到的是行的**上边缘**, 而那就是行边界: 真点击只要偏下半个像素就落到上一行。
+# 所以再往行中间挪, 每挪一个位置都投递点击复核一次, 挑出第一个仍然属于靶子行的 y。
+function Pick-VictimPoint($btnTile,$lv,$rowTop){
+  foreach($off in @(10,8,6,12,0)){
+    $cy = $rowTop + $off
+    if((Get-RowNameAt $btnTile $lv $cy) -eq 'DeskTiler快排'){
+      $null = Log ("  落点 client y={0} (行顶 {1} + {2}) 复核通过" -f $cy,$rowTop,$off)
+      return $cy
+    }
+  }
+  return -1
+}
+
+# 找行 -> 挑落点复核 -> 右键。三段都成了才返回菜单句柄(0 = 没成)
+function Open-VictimMenu($btnTile,$lv){
+  for($attempt=1; $attempt -le 2; $attempt++){
+    $rowTop = Find-VictimRow $btnTile $lv
+    if($rowTop -lt 0){ $null = Log ("  第 {0} 次找行: 列表里没看到靶子那一行" -f $attempt); continue }
+    $cy = Pick-VictimPoint $btnTile $lv $rowTop
+    if($cy -lt 0){ $null = Log ("  第 {0} 次找行: 行顶 {1} 附近复核都不是靶子行(列表动过), 重来" -f $attempt,$rowTop); continue }
+    $m = Open-RowMenu $cy
+    if($m -ne [IntPtr]::Zero){ return $m }
+    $null = Log ("  第 {0} 次找行: 行是对的, 但菜单没弹出来" -f $attempt)
+  }
+  return [IntPtr]::Zero
+}
+
+# 这一段自己起靶子, 不用前面那个已经跑了近百秒的实例 —— 否则本机别的风吹草动(实例被关掉)
+# 会让右键菜单的结论跟着一起垮。先收掉旧的, 保证列表里只剩一个新的 DeskTiler 行, 找行才不含糊。
+$p2.Refresh()
+if(-not $p2.HasExited){
+  try { Stop-Process -Id $p2.Id -Force } catch {}
+  Start-Sleep -Milliseconds 900
+}
+$pv = [System.Diagnostics.Process]::Start($exe)
+$hv = Wait-Hwnd $pv
+Chk ($hv -ne [IntPtr]::Zero) '右键菜单: 为这一段新起的目标实例已就绪'
+Log ("  fresh target pid={0} hwnd={1}" -f $pv.Id,([int64]$hv))
+
+# 列表是“关掉自动刷新”之后冻住的快照, 得点一次「刷新」才收得进新实例
+$ref2 = $kids | Where-Object { $_.Cap -eq '刷新(&R)' } | Select-Object -First 1
+if($ref2){
+  [void][VW]::SendMessageW($ref2.Hwnd,0x00F5,[IntPtr]::Zero,[IntPtr]::Zero)   # BM_CLICK
+  Start-Sleep -Milliseconds 1200
+}
+
+$pt0 = New-Object VEPT
+$cursorSaved = [VW]::GetCursorPos([ref]$pt0)
+$btnTile = $kids | Where-Object { $_.Cls -eq 'TButton' -and $_.Cap -like '*快排' -and (@('目录快排','PowerShell快排','Cmd快排') -notcontains $_.Cap) } | Select-Object -First 1
+$lvr = Get-RectOf $lv
+Log ("  lv rect={0},{1},{2},{3}; target pid={4} hwnd={5}" -f $lvr.L,$lvr.T,$lvr.R,$lvr.B,$pv.Id,([int64]$hv))
+
+$victimY = Find-VictimRow $btnTile $lv
+Chk ($victimY -ge 0) ('在列表里定位到目标实例所在的行(client y=' + $victimY + ')')
+
+if($victimY -ge 0){
+
+  # (a) 右键那一行 -> 弹出原生菜单
+  $m = Open-VictimMenu $btnTile $lv
+  Chk ($m -ne [IntPtr]::Zero) '右键列表某行: 弹出原生右键菜单(#32768)'
+  if($m -ne [IntPtr]::Zero){
+    $mr = Get-RectOf $m
+    $hm = [VW]::SendMessageW($m,0x01E1,[IntPtr]::Zero,[IntPtr]::Zero)          # MN_GETHMENU
+    $mi = -1
+    if($hm -ne [IntPtr]::Zero){ $mi = [VW]::GetMenuItemCount($hm) }
+    Log ("  menu: {0}x{1}px at ({2},{3}) items={4}" -f ($mr.R-$mr.L),($mr.B-$mr.T),$mr.L,$mr.T,$mi)
+    Chk ($mi -eq 2) '右键菜单正好两项(结束进程 / 转到应用)'
+    # 菜单已弹出、还没点任何一项: 记一下此刻列表的矩形与行数, 万一以后又不一致, 好拿它对表。
+    # (注意: 这里只能读, 不能往列表投递点击 —— 那种消息会把菜单顶掉, 后面那一下点击就落空了。)
+    $lvn = Get-ClientOrigin $lv
+    $null = Log ("  [diag] menu open: lv client origin={0},{1}; items={2}" -f `
+      $lvn[0],$lvn[1],([int64][VW]::SendMessageW($lv,0x1004,[IntPtr]::Zero,[IntPtr]::Zero)))
+
+    # (b) 第一项 = 结束进程 -> 原生确认框(正文有句柄, 跨进程读得到)
+    [void](Click-MenuItem $m 0.25)
+    Start-Sleep -Milliseconds 300
+    $dlg = Find-TopWindow '#32770'
+    $dtit = ''; $dtxt = ''
+    if($dlg -ne [IntPtr]::Zero){ $dtit = Get-Cap $dlg; $dtxt = Get-DialogText $dlg }
+    Log ("  dialog: title='{0}' text='{1}'" -f $dtit,($dtxt -replace "`r`n",' // '))
+    Chk ($dlg -ne [IntPtr]::Zero -and $dtit -eq '结束进程') '「结束进程」弹出确认框(标题=结束进程)'
+    Chk ($dtxt.Contains('DeskTiler') -and $dtxt.Contains('PID ' + $pv.Id)) '确认框点名了要结束的应用与 PID'
+
+    # (c) 点「否」 -> 对话框关掉, 进程一个都不能少
+    if($dlg -ne [IntPtr]::Zero){
+      [void][VW]::SendMessageW([VW]::GetDlgItem($dlg,7),0x00F5,[IntPtr]::Zero,[IntPtr]::Zero)   # IDNO / BM_CLICK
+      Start-Sleep -Milliseconds 800
+      $pv.Refresh()
+      $gone = ((Find-TopWindow '#32770') -eq [IntPtr]::Zero)
+      Log ("  after NO: dialog closed={0} target alive={1}" -f $gone,(-not $pv.HasExited))
+      Chk ($gone -and -not $pv.HasExited) '点「否」: 对话框关闭且目标进程仍存活(没有误杀)'
+    }
+
+    # (d) 第二项 = 转到应用 -> 该行窗口被激活到前台
+    $m2 = Open-VictimMenu $btnTile $lv
+    if($m2 -ne [IntPtr]::Zero){
+      [void](Click-MenuItem $m2 0.75)
+      Start-Sleep -Milliseconds 700
+      $fg = [VW]::GetForegroundWindow()
+      Log ("  foreground after 转到应用: {0} (target {1})" -f ([int64]$fg),([int64]$hv))
+      Chk ([int64]$fg -eq [int64]$hv) '「转到应用」把目标窗口激活到前台'
+    } else { Chk $false '再次右键未能弹出菜单(无法验证「转到应用」)' }
+
+    # (e) 再走一遍结束进程, 这次点「是」 -> 进程真的没了
+    $m3 = Open-VictimMenu $btnTile $lv
+    if($m3 -ne [IntPtr]::Zero){
+      [void](Click-MenuItem $m3 0.25)
+      Start-Sleep -Milliseconds 300
+      $dlg2 = Find-TopWindow '#32770'
+      $t2 = ''
+      if($dlg2 -ne [IntPtr]::Zero){ $t2 = Get-DialogText $dlg2 }
+      Log ("  kill dialog: '" + ($t2 -replace "`r`n",' // ') + "'")
+      # 安全闸: 只有确认框点名的就是我们自己起的那个进程, 才真去按「是」
+      if($dlg2 -ne [IntPtr]::Zero -and $t2.Contains('PID ' + $pv.Id)){
+        [void][VW]::SendMessageW([VW]::GetDlgItem($dlg2,6),0x00F5,[IntPtr]::Zero,[IntPtr]::Zero)  # IDYES
+        $ended = $pv.WaitForExit(5000)
+        Log ("  after YES: target exited={0}" -f $ended)
+        Chk $ended '点「是」: 目标进程确实被结束'
+      } else {
+        if($dlg2 -ne [IntPtr]::Zero){ [void][VW]::SendMessageW([VW]::GetDlgItem($dlg2,7),0x00F5,[IntPtr]::Zero,[IntPtr]::Zero) }
+        Chk $false ('确认框点名的不是目标进程, 已按「否」放弃: ' + $t2)
+      }
+    } else { Chk $false '第三次右键未能弹出菜单(无法验证真正结束进程)' }
+  }
+}
+if($cursorSaved){ [void][VW]::SetCursorPos($pt0.X,$pt0.Y) }   # 真光标挪过, 还回去
+
 # ============ 清理 ============
 try { Stop-Process -Id $p1.Id -Force -ErrorAction SilentlyContinue } catch {}
+if($pv){ try { Stop-Process -Id $pv.Id -Force -ErrorAction SilentlyContinue } catch {} }
 try { Stop-Process -Id $p2.Id -Force -ErrorAction SilentlyContinue } catch {}
 Log '== verify done =='
 Log ("RESULT: {0} failure(s)" -f $script:fail)
