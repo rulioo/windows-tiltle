@@ -10,6 +10,8 @@
 #   2f) 列表右键菜单: 右键某行弹出「结束进程/转到应用」两项;
 #       结束进程 -> 原生确认框点名应用与 PID, 点「否」不杀(进程仍在), 点「是」真杀(进程退出);
 #       转到应用 -> 该行窗口被激活到前台。这一段自己起一个新实例当靶子, 只动自己造的进程。
+#   2g) 「转到应用」+「本窗口置顶」: 重叠时工具窗口先最小化让开, 靶子中心真的露出来且成为前台;
+#       错开摆放(不重叠)时不让开。这一段也自己起一个靶子实例。
 #   3) 表头排序: -sorttest 在程序内按 PID/应用 升序/降序各排一次(真实 SortList 路径)
 #   4) -tileapp DeskTiler 平铺两个目标 -> 校验为均分网格(等大、不相交、相邻)
 #   说明: 本机单显示器, 手动指定屏的“跨屏平铺”无法自动化; 覆盖控件存在 + 自动兜底路径
@@ -57,6 +59,10 @@ public class VW {
   [DllImport("user32.dll")] public static extern IntPtr SendMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] public static extern int GetWindowLongW(IntPtr h, int idx);   // idx=-20 -> GWL_EXSTYLE
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint f);
+  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint f);    // f=2 -> GA_ROOT
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] public static extern int CompareStringW(int locale, int dwCmpFlags, string a, int ca, string b, int cb);
 }
 "@
@@ -102,6 +108,8 @@ function Rects-Overlap($a,$b){
   return ($a.L -lt $b.R -and $b.L -lt $a.R -and $a.T -lt $b.B -and $b.T -lt $a.B)
 }
 function EX-TopMost($h){ return (([VW]::GetWindowLongW($h,-20)) -band 0x00000008) -ne 0 }   # WS_EX_TOPMOST
+# WindowFromPoint 给的是最底下的子窗口(列表/按钮…), 要判断“这一片屏幕上盖着的是谁”得回溯到顶层
+function Root-Of($h){ if($h -eq [IntPtr]::Zero){ return [IntPtr]::Zero }; return [VW]::GetAncestor($h,2) }
 # 文字在“窗体那套字体”(Microsoft YaHei UI 9pt)下的像素宽 —— 走的也是 GDI 度量,
 # 与程序内 Self.Canvas.TextWidth 同一套算法, 所以“按钮够不够宽装下这行字”可以直接断言。
 # (本机 100% 缩放: 顶栏按钮实测宽度与代码里写的 80/86/92/126/108 一模一样, 9pt 即 12px。)
@@ -779,6 +787,85 @@ if($victimY -ge 0){
   }
 }
 if($cursorSaved){ [void][VW]::SetCursorPos($pt0.X,$pt0.Y) }   # 真光标挪过, 还回去
+
+# ============ (2g) 勾着「本窗口置顶」时「转到应用」必须真的看得见 ============
+# 用户报的问题: 勾上「本窗口置顶」后点「转到应用」什么也看不到 —— 置顶窗口永远浮在普通窗口
+# 之上, 目标窗口就算被激活也只能躲在工具窗口后面(实测连前台都没换来)。现在的做法: 两者矩形
+# 相交时先把工具窗口最小化让开再激活目标; 错开摆放(不重叠)时不让开, 不打扰“让工具一直浮着”。
+# 仍然只动本脚本自己起的实例。
+Log '== (2g) 转到应用 @ 本窗口置顶 =='
+$SWP_NA = 0x0010 -bor 0x0040            # SWP_NOACTIVATE | SWP_SHOWWINDOW
+$pw = [System.Diagnostics.Process]::Start($exe)
+$hw = Wait-Hwnd $pw
+Chk ($hw -ne [IntPtr]::Zero) '(2g) 为置顶场景新起的目标实例已就绪'
+
+if($hw -ne [IntPtr]::Zero -and $ref2 -and $chkSelf){
+  $null = Log ("  pid={0} hwnd={1}" -f $pw.Id,([int64]$hw))
+  # 列表是冻住的快照, 点一次「刷新」把新实例收进来
+  [void][VW]::SendMessageW($ref2.Hwnd,0x00F5,[IntPtr]::Zero,[IntPtr]::Zero)
+  Start-Sleep -Milliseconds 1200
+
+  $dr0 = Get-RectOf $script:hMain
+  # 靶子摆里侧、工具窗口摆外侧: 让置顶的工具窗口正好压住靶子中心
+  [void][VW]::SetWindowPos($hw,[IntPtr]::Zero,200,200,700,600,$SWP_NA)
+  Start-Sleep -Milliseconds 400
+  [void][VW]::SetWindowPos($script:hMain,[IntPtr]::Zero,60,60,1000,900,$SWP_NA)
+  Start-Sleep -Milliseconds 500
+  $nc = Get-RectOf $hw
+  $tcx = [int](($nc.L+$nc.R)/2); $tcy = [int](($nc.T+$nc.B)/2)
+
+  [void][VW]::SendMessageW($chkSelf.Hwnd,0x00F5,[IntPtr]::Zero,[IntPtr]::Zero)   # 勾上「本窗口置顶」
+  Start-Sleep -Milliseconds 600
+  Chk (EX-TopMost $script:hMain) '(2g) 「本窗口置顶」已生效(工具窗口 WS_EX_TOPMOST)'
+
+  $coverBefore = Root-Of ([VW]::WindowFromPoint((To-Pt $tcx $tcy)))
+  $null = Log ("  场景一前置: 靶子中心 ({0},{1}) 上盖着 {2} (工具={3} 靶子={4})" -f $tcx,$tcy,`
+    ([int64]$coverBefore),([int64]$script:hMain),([int64]$hw))
+  Chk ($coverBefore -eq $script:hMain) '(2g) 前置: 置顶的工具窗口确实压住了靶子中心(否则这条用例没意义)'
+
+  $mg = Open-VictimMenu $btnTile $lv
+  if($mg -ne [IntPtr]::Zero){
+    [void](Click-MenuItem $mg 0.75)                                             # 第二项 = 转到应用
+    Start-Sleep -Milliseconds 900
+    $fg = [VW]::GetForegroundWindow()
+    $coverAfter = Root-Of ([VW]::WindowFromPoint((To-Pt $tcx $tcy)))
+    $null = Log ("  点「转到应用」后: fg={0} 工具最小化={1} 靶子最小化={2} 靶子中心上盖着={3}" -f `
+      ([int64]$fg),[VW]::IsIconic($script:hMain),[VW]::IsIconic($hw),([int64]$coverAfter))
+    Chk ([VW]::IsIconic($script:hMain)) '(2g) 重叠时工具窗口最小化让开'
+    Chk ($coverAfter -eq $hw) '(2g) 靶子中心真的露出来了(不再被工具窗口压着)'
+    Chk ([int64]$fg -eq [int64]$hw) '(2g) 靶子窗口成为前台窗口'
+  } else { Chk $false '(2g) 右键没能弹出菜单, 无法验证“重叠 + 置顶”场景' }
+
+  # 场景二: 置顶但两者错开摆放 -> 不该让开(用户勾置顶就是想让它一直浮着)
+  [void][VW]::ShowWindow($script:hMain,9)                                       # SW_RESTORE
+  Start-Sleep -Milliseconds 500
+  [void][VW]::SetWindowPos($script:hMain,[IntPtr]::Zero,700,450,900,600,$SWP_NA)
+  [void][VW]::SetWindowPos($hw,[IntPtr]::Zero,40,40,420,300,$SWP_NA)
+  Start-Sleep -Milliseconds 600
+  $nc2 = Get-RectOf $hw
+  $tcx2 = [int](($nc2.L+$nc2.R)/2); $tcy2 = [int](($nc2.T+$nc2.B)/2)
+  $cover2 = Root-Of ([VW]::WindowFromPoint((To-Pt $tcx2 $tcy2)))
+  $null = Log ("  场景二前置: 靶子中心 ({0},{1}) 上盖着 {2} (工具={3})" -f $tcx2,$tcy2,([int64]$cover2),([int64]$script:hMain))
+  Chk ($cover2 -eq $hw) '(2g) 前置: 错开摆放后工具窗口确实不压靶子'
+
+  $mg2 = Open-VictimMenu $btnTile $lv
+  if($mg2 -ne [IntPtr]::Zero){
+    [void](Click-MenuItem $mg2 0.75)
+    Start-Sleep -Milliseconds 900
+    $fg2 = [VW]::GetForegroundWindow()
+    $null = Log ("  点「转到应用」后: fg={0} 工具最小化={1}" -f ([int64]$fg2),[VW]::IsIconic($script:hMain))
+    Chk (-not ([VW]::IsIconic($script:hMain))) '(2g) 不重叠时不让开(工具窗口没被最小化)'
+    Chk ([int64]$fg2 -eq [int64]$hw) '(2g) 不重叠时靶子窗口同样成为前台'
+  } else { Chk $false '(2g) 右键没能弹出菜单, 无法验证“不重叠 + 置顶”场景' }
+
+  # 还原: 取消置顶 + 工具窗口回到原来的位置尺寸
+  [void][VW]::SendMessageW($chkSelf.Hwnd,0x00F5,[IntPtr]::Zero,[IntPtr]::Zero)
+  Start-Sleep -Milliseconds 400
+  [void][VW]::SetWindowPos($script:hMain,[IntPtr]::Zero,$dr0.L,$dr0.T,($dr0.R-$dr0.L),($dr0.B-$dr0.T),$SWP_NA)
+  Start-Sleep -Milliseconds 300
+  Log ("  还原: 置顶={0} 工具最小化={1}" -f (EX-TopMost $script:hMain),[VW]::IsIconic($script:hMain))
+}
+if($pw){ try { Stop-Process -Id $pw.Id -Force -ErrorAction SilentlyContinue } catch {} }
 
 # ============ 清理 ============
 try { Stop-Process -Id $p1.Id -Force -ErrorAction SilentlyContinue } catch {}

@@ -1334,16 +1334,38 @@ begin
 end;
 
 { 转到应用: 把该行窗口还原(若最小化)并激活到最前。
-   直接复用平铺收尾用的那个 ActivateWindow —— 它已经处理了 Windows 的前台锁。 }
+   直接复用平铺收尾用的那个 ActivateWindow —— 它已经处理了 Windows 的前台锁。
+
+   但「本窗口置顶」勾着时, 光激活是不够的: 置顶窗口永远浮在普通窗口之上,
+   目标窗口就算被激活也只能躲在工具窗口后面, 用户还是看不见它
+   (实测勾上置顶后点这一项, 前台甚至仍停在工具窗口上, 目标纹丝不动)。
+   所以这时先把工具窗口最小化让开, 再激活 —— 顺序不能反:
+   先让开, 目标不再被置顶层级压住, 前台切换才稳。
+   只有两个窗口真的重叠时才让开: 多显示器或错开摆放时工具窗口并不挡路,
+   而用户勾「本窗口置顶」本来就想让它一直浮着, 没必要收起来。 }
 procedure TMainForm.OnGotoAppClick(Sender: TObject);
+var
+  ra, rb, ri: TRect;
+  away: Boolean;
 begin
   if (FMenuHwnd = 0) or not IsWindow(FMenuHwnd) then
   begin
     LblMsg.Caption := '这一行对应的窗口已经关掉了';
     Exit;
   end;
+  if IsIconic(FMenuHwnd) then
+    ShowWindow(FMenuHwnd, SW_RESTORE);   // 最小化时矩形量不准, 还原了再比
+  away := False;
+  if (ChkSelfTop <> nil) and ChkSelfTop.Checked and HandleAllocated then
+    if GetWindowRect(Handle, ra) and GetWindowRect(FMenuHwnd, rb) then
+      away := IntersectRect(ri, ra, rb);
+  if away then
+    ShowWindow(Handle, SW_MINIMIZE);
   ActivateWindow(FMenuHwnd);
-  LblMsg.Caption := Format('已转到 %s', [FMenuApp]);
+  if away then
+    LblMsg.Caption := Format('已转到 %s（本窗口已最小化让开，从任务栏点回来即可）', [FMenuApp])
+  else
+    LblMsg.Caption := Format('已转到 %s', [FMenuApp]);
 end;
 
 { 「应用快排」按钮的字样与宽度跟着选中的应用走:
