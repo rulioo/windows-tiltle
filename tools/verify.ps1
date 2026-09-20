@@ -12,6 +12,10 @@
 #       转到应用 -> 该行窗口被激活到前台。这一段自己起一个新实例当靶子, 只动自己造的进程。
 #   2g) 「转到应用」+「本窗口置顶」: 重叠时工具窗口先最小化让开, 靶子中心真的露出来且成为前台;
 #       错开摆放(不重叠)时不让开。这一段也自己起一个靶子实例。
+#   2h) 右键列表某一行: 选中的正好是那一行(单选, 不累加), 「应用快排」跟着那一行走 ——
+#       行号断言在“列表冻着”时做(开着自动刷新的话表每 2.5 秒按 Z 序重排, 行号不是身份);
+#       之后再临时打开自动刷新跨过一轮整表重建, 量“选中的还是同一个窗口、仍旧只有一行”。
+#       期望值不写死窗口标题 —— 都现取(投递一次左键问程序自己), 机器上的真实窗口随时会变。
 #   3) 表头排序: -sorttest 在程序内按 PID/应用 升序/降序各排一次(真实 SortList 路径)
 #   4) -tileapp DeskTiler 平铺两个目标 -> 校验为均分网格(等大、不相交、相邻)
 #   说明: 本机单显示器, 手动指定屏的“跨屏平铺”无法自动化; 覆盖控件存在 + 自动兜底路径
@@ -41,6 +45,7 @@ public class VW {
   [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr p, ChildEnum cb, IntPtr l);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
   // 右键菜单是原生弹出菜单(#32768), 它的模态循环按“真实光标位置”跟踪,
   // PostMessage 造的鼠标消息它不认 —— 只能喂真光标 + 真鼠标事件。
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
@@ -63,6 +68,7 @@ public class VW {
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint f);
   [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint f);    // f=2 -> GA_ROOT
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint f, IntPtr extra);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] public static extern int CompareStringW(int locale, int dwCmpFlags, string a, int ca, string b, int cb);
 }
 "@
@@ -631,7 +637,9 @@ $script:hLv   = $lv
 # (列表里读不到文字, 但按钮改名是可以跨进程读的; 驱动实例不把自己列进自己的表, 所以只有一行是它。)
 function Find-VictimRow($btnTile,$lv){
   $nItems = [int64][VW]::SendMessageW($lv,0x1004,[IntPtr]::Zero,[IntPtr]::Zero)
-  for($k=0; $k -lt [Math]::Min($nItems,12); $k++){
+  # 扫**全部**行: 原来是写死的 12 行, 机器上窗口多一条(13 行)时靶子正好落在最后一行就找不到
+  # (投递点击不需要那一行可见, 行距 20px 对任何行号都成立)
+  for($k=0; $k -lt [Math]::Min($nItems,40); $k++){
     $rowY = -1
     foreach($cand in @(($k*20+32),($k*20+27),($k*20+37))){
       $lp = [IntPtr]((([int]$cand) -shl 16) -bor 60)
@@ -690,11 +698,16 @@ function Open-VictimMenu($btnTile,$lv){
 
 # 这一段自己起靶子, 不用前面那个已经跑了近百秒的实例 —— 否则本机别的风吹草动(实例被关掉)
 # 会让右键菜单的结论跟着一起垮。先收掉旧的, 保证列表里只剩一个新的 DeskTiler 行, 找行才不含糊。
-$p2.Refresh()
-if(-not $p2.HasExited){
-  try { Stop-Process -Id $p2.Id -Force } catch {}
-  Start-Sleep -Milliseconds 900
+#
+# 找行是按「应用名 = DeskTiler」认的(跨进程读不到 PID 列, 那一列早没了), 所以列表里**同名的行
+# 只能有一条**。踩过: 机器上另有 DeskTiler 实例时, 这段右键点到了人家那一行, 确认框点名的是
+# PID 13168 而不是靶子 26916, 后面三次「转到应用」也一路把前台切到那个别人的窗口上。
+# 驱动自己以外的 DeskTiler 一律收掉 —— 这工具没有任何未保存状态, 开头那一段也是这么干的。
+Get-Process DeskTiler -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $p1.Id } | ForEach-Object {
+  $null = Log ("  收掉多余的 DeskTiler 实例 pid={0}" -f $_.Id)
+  try { Stop-Process -Id $_.Id -Force -ErrorAction Stop } catch { $null = Log ("    收不掉: " + $_.Exception.Message) }
 }
+Start-Sleep -Milliseconds 900
 $pv = [System.Diagnostics.Process]::Start($exe)
 $hv = Wait-Hwnd $pv
 Chk ($hv -ne [IntPtr]::Zero) '右键菜单: 为这一段新起的目标实例已就绪'
@@ -755,14 +768,24 @@ if($victimY -ge 0){
     }
 
     # (d) 第二项 = 转到应用 -> 该行窗口被激活到前台
-    $m2 = Open-VictimMenu $btnTile $lv
-    if($m2 -ne [IntPtr]::Zero){
+    # 这一下是真光标 + 真鼠标事件, 而且要把前台抢过来。机器上如果**有人同时在操作**,
+    # Windows 的前台锁会把这次 SetForegroundWindow 顶掉(实测偶发, 同一份程序有时红有时绿)。
+    # 所以动作重试几次, 判定仍然只做一次 —— 真是程序没激活的话, 重试多少次都过不了。
+    $fg = [IntPtr]::Zero
+    $tried = 0
+    for($try = 1; $try -le 3; $try++){
+      $m2 = Open-VictimMenu $btnTile $lv
+      if($m2 -eq [IntPtr]::Zero){ $null = Log ("  第 {0} 次: 右键没能弹出菜单" -f $try); continue }
+      $tried++
       [void](Click-MenuItem $m2 0.75)
       Start-Sleep -Milliseconds 700
       $fg = [VW]::GetForegroundWindow()
-      Log ("  foreground after 转到应用: {0} (target {1})" -f ([int64]$fg),([int64]$hv))
-      Chk ([int64]$fg -eq [int64]$hv) '「转到应用」把目标窗口激活到前台'
-    } else { Chk $false '再次右键未能弹出菜单(无法验证「转到应用」)' }
+      $null = Log ("  第 {0} 次「转到应用」: fg={1} '{2}' (target {3} 最小化={4}; 工具最小化={5})" -f `
+        $try,([int64]$fg),(Get-Cap $fg),([int64]$hv),[VW]::IsIconic($hv),[VW]::IsIconic($script:hMain))
+      if([int64]$fg -eq [int64]$hv){ break }
+    }
+    if($tried -gt 0){ Chk ([int64]$fg -eq [int64]$hv) '「转到应用」把目标窗口激活到前台' }
+    else { Chk $false '再次右键未能弹出菜单(无法验证「转到应用」)' }
 
     # (e) 再走一遍结束进程, 这次点「是」 -> 进程真的没了
     $m3 = Open-VictimMenu $btnTile $lv
@@ -818,9 +841,22 @@ if($hw -ne [IntPtr]::Zero -and $ref2 -and $chkSelf){
   Start-Sleep -Milliseconds 600
   Chk (EX-TopMost $script:hMain) '(2g) 「本窗口置顶」已生效(工具窗口 WS_EX_TOPMOST)'
 
-  $coverBefore = Root-Of ([VW]::WindowFromPoint((To-Pt $tcx $tcy)))
-  $null = Log ("  场景一前置: 靶子中心 ({0},{1}) 上盖着 {2} (工具={3} 靶子={4})" -f $tcx,$tcy,`
-    ([int64]$coverBefore),([int64]$script:hMain),([int64]$hw))
+  # 前置核验: 量“置顶的工具窗口是不是真的压住了靶子中心”。
+  # 有两件事会让它不成立, 但都不是被测程序的错: ①工具窗口被谁(用户)最小化了 —— 上面那次
+  # SetWindowPos 带的是 SWP_SHOWWINDOW, 它**不会**把已最小化的窗口还原, 窗口就一直缩在任务栏上;
+  # ②有人同时在点别的窗口, 前台/Z 序当场被搅动。所以先还原再重摆, 最多试 3 次, 判定只做一次。
+  $coverBefore = [IntPtr]::Zero
+  for($try = 1; $try -le 3; $try++){
+    if([VW]::IsIconic($script:hMain)){ [void][VW]::ShowWindow($script:hMain,9); Start-Sleep -Milliseconds 400 }
+    [void][VW]::SetWindowPos($script:hMain,[IntPtr]::Zero,60,60,1000,900,$SWP_NA)
+    Start-Sleep -Milliseconds 500
+    $coverBefore = Root-Of ([VW]::WindowFromPoint((To-Pt $tcx $tcy)))
+    $rcDr = Get-RectOf $script:hMain
+    $null = Log ("  第 {0} 次前置: 靶子中心 ({1},{2}) 上盖着 {3} '{4}' (工具={5} 靶子={6}); 工具矩形={7},{8},{9},{10} 最小化={11} 置顶={12} 靶子最小化={13}" `
+      -f $try,$tcx,$tcy,([int64]$coverBefore),(Get-Cap $coverBefore),([int64]$script:hMain),([int64]$hw),`
+      $rcDr.L,$rcDr.T,$rcDr.R,$rcDr.B,[VW]::IsIconic($script:hMain),(EX-TopMost $script:hMain),[VW]::IsIconic($hw))
+    if($coverBefore -eq $script:hMain){ break }
+  }
   Chk ($coverBefore -eq $script:hMain) '(2g) 前置: 置顶的工具窗口确实压住了靶子中心(否则这条用例没意义)'
 
   $mg = Open-VictimMenu $btnTile $lv
@@ -848,12 +884,21 @@ if($hw -ne [IntPtr]::Zero -and $ref2 -and $chkSelf){
   $null = Log ("  场景二前置: 靶子中心 ({0},{1}) 上盖着 {2} (工具={3})" -f $tcx2,$tcy2,([int64]$cover2),([int64]$script:hMain))
   Chk ($cover2 -eq $hw) '(2g) 前置: 错开摆放后工具窗口确实不压靶子'
 
-  $mg2 = Open-VictimMenu $btnTile $lv
-  if($mg2 -ne [IntPtr]::Zero){
+  # 同样重试几次再判定: 抢前台会被别人的操作顶掉, 理由同 (2f)(d)
+  $fg2 = [IntPtr]::Zero
+  $tried2 = 0
+  for($try = 1; $try -le 3; $try++){
+    $mg2 = Open-VictimMenu $btnTile $lv
+    if($mg2 -eq [IntPtr]::Zero){ $null = Log ("  第 {0} 次: 右键没能弹出菜单" -f $try); continue }
+    $tried2++
     [void](Click-MenuItem $mg2 0.75)
     Start-Sleep -Milliseconds 900
     $fg2 = [VW]::GetForegroundWindow()
-    $null = Log ("  点「转到应用」后: fg={0} 工具最小化={1}" -f ([int64]$fg2),[VW]::IsIconic($script:hMain))
+    $null = Log ("  第 {0} 次「转到应用」(不重叠): fg={1} '{2}' (target {3}) 工具最小化={4}" -f `
+      $try,([int64]$fg2),(Get-Cap $fg2),([int64]$hw),[VW]::IsIconic($script:hMain))
+    if([int64]$fg2 -eq [int64]$hw){ break }
+  }
+  if($tried2 -gt 0){
     Chk (-not ([VW]::IsIconic($script:hMain))) '(2g) 不重叠时不让开(工具窗口没被最小化)'
     Chk ([int64]$fg2 -eq [int64]$hw) '(2g) 不重叠时靶子窗口同样成为前台'
   } else { Chk $false '(2g) 右键没能弹出菜单, 无法验证“不重叠 + 置顶”场景' }
@@ -866,6 +911,199 @@ if($hw -ne [IntPtr]::Zero -and $ref2 -and $chkSelf){
   Log ("  还原: 置顶={0} 工具最小化={1}" -f (EX-TopMost $script:hMain),[VW]::IsIconic($script:hMain))
 }
 if($pw){ try { Stop-Process -Id $pw.Id -Force -ErrorAction SilentlyContinue } catch {} }
+
+# ============ (2h) 右键某一行: 选中的必须正好是那一行 ============
+# 用户报的问题: “当右键点击列表项某一行, 总是莫名其妙其他的行被选中”。两个原因叠在一起:
+#   1) 坐标慢一拍 —— 列表视图收到 WM_RBUTTONDOWN 时会先同步发出 NM_RCLICK, VCL 当场把菜单
+#      弹起来并进入菜单自己的模态循环, 等菜单关掉才轮到 Lv.OnMouseDown; 于是 OnPopup 读到的
+#      永远是**上一次**右键的坐标, 菜单老作用在上一行。现在坐标改在消息派发前接住
+#      (Application.OnMessage), 实测 4 次右键 4 次对得上。
+#   2) 多选累加 —— Lv.MultiSelect=True 时 it.Selected:=True 是加选不是改选, 右键一圈下来好几行
+#      都亮着; 已改成单选(平铺选哪些窗口本来就是靠勾选框的)。
+# 两把尺子一起量: 「选中的行集合正好是右键那一行」, 以及「应用快排」按钮改成的那行应用名
+# 就是被右键那一行(那是程序自己认定的目标行)。这两条都在**列表冻着**(自动刷新关)时做,
+# 行号才算数; 之后再打开自动刷新跨过一轮整表重建, 量“选中的还是不是同一个窗口”。
+Log '== (2h) 右键某一行 =='
+function As-Idx($v){ $x = $v.ToInt64(); if($x -gt 0x7FFFFFFF){ return $x - 0x100000000 }; return $x }
+# 跨进程 SendMessage 的返回值是零扩展的 32 位: “没有” -1 回来是 4294967295, 得折回去
+function Sel-Set($lv){
+  $res = @()
+  # 句柄没了的话 SendMessage 一律返回 0, 下面这个循环会一路加到上限, 打出来是 {0,0,0,...} ——
+  # 看着像“选中了几十行”, 其实是窗口没了。这种时候直接给个不可能当行号的哨兵值, 好认。
+  if(-not [VW]::IsWindow($lv)){ return ,@(-99) }
+  $i = As-Idx ([VW]::SendMessageW($lv,0x100C,[IntPtr](-1),[IntPtr]2))     # LVM_GETNEXTITEM / LVNI_SELECTED
+  while($i -ge 0 -and $res.Count -lt 40){
+    $res += [int]$i
+    $i = As-Idx ([VW]::SendMessageW($lv,0x100C,[IntPtr]$i,[IntPtr]2))
+  }
+  return ,$res
+}
+function Set-Text($set){ if($set.Count -eq 0){ return '{}' }; return '{' + ($set -join ',') + '}' }
+
+$pt0 = New-Object VEPT
+$cursorSaved2 = [VW]::GetCursorPos([ref]$pt0)
+$dr1 = Get-RectOf $script:hMain
+# 把窗口拉高一点, 保证要点的几行都在可视区里(窗口怎么挪都不影响投递点击 —— 那是客户区坐标)
+[void][VW]::SetWindowPos($script:hMain,[IntPtr]::Zero,$dr1.L,$dr1.T,($dr1.R-$dr1.L),[Math]::Max(($dr1.B-$dr1.T),900),$SWP_NA)
+Start-Sleep -Milliseconds 700
+
+# 这一节要连着真点好几行, 而用户可能正开着别的窗口压在工具窗口上(实测有一次整屏被 Chrome 盖住,
+# 于是哪一行都点不到)。临时把自己抬到最顶层只为“点得到行” —— 量的本来就不是 Z 序;
+# 前面 (2g) 才是量置顶的那一节, 所以这里完事要还原。
+$drTop = EX-TopMost $script:hMain
+$SWP_NMNA = 0x0001 -bor 0x0002 -bor 0x0010                       # NOSIZE | NOMOVE | NOACTIVATE
+[void][VW]::SetWindowPos($script:hMain,[IntPtr](-1),0,0,0,0,$SWP_NMNA)     # HWND_TOPMOST
+Start-Sleep -Milliseconds 400
+Log ("  工具窗口临时抬到最顶层(原来 topmost={0}), 免得行被别的窗口盖着点不到" -f $drTop)
+
+# 先点一次「刷新」把**陈旧行**清掉: 前面 (2f)/(2g) 杀掉的靶子实例在列表里还留着行,
+# 等自动刷新把它剔掉时, 它下面的行会整体上移一位 —— 那是列表内容真的变了, 别当成 bug 量进去。
+if($ref2){
+  [void][VW]::SendMessageW($ref2.Hwnd,0x00F5,[IntPtr]::Zero,[IntPtr]::Zero)   # BM_CLICK
+  Start-Sleep -Milliseconds 1200
+}
+
+# 自动刷新这一节全程都是关着的(整套自检从开头就把它关了), 阶段二才临时打开
+$autoWas = $false
+if($auto){
+  $autoWas = ([int64][VW]::SendMessageW($auto.Hwnd,0x00F0,[IntPtr]::Zero,[IntPtr]::Zero)) -ne 0   # BM_GETCHECK
+  if($autoWas){
+    [void][VW]::SendMessageW($auto.Hwnd,0x00F5,[IntPtr]::Zero,[IntPtr]::Zero)   # 关掉它, 让列表冻住
+    Start-Sleep -Milliseconds 500
+  }
+  Log ("  auto-refresh was={0} (行号断言阶段要它关着)" -f $autoWas)
+}
+
+$nItems2 = [int][VW]::SendMessageW($lv,0x1004,[IntPtr]::Zero,[IntPtr]::Zero)     # LVM_GETITEMCOUNT
+Log ("  items={0}" -f $nItems2)
+
+# 行 k 的落点(客户区 y): 行顶 = 32 + 20k, 取行中间
+function Row-Y($k){ return (32 + $k*20 + 10) }
+function Row-Clickable($clientY){
+  $o = Get-ClientOrigin $lv
+  return ([VW]::WindowFromPoint((To-Pt ($o[0]+60) ($o[1]+$clientY))) -eq $lv)
+}
+function Close-Menu-Esc{
+  [VW]::keybd_event(0x1B,0,0,[IntPtr]::Zero); Start-Sleep -Milliseconds 60
+  [VW]::keybd_event(0x1B,0,2,[IntPtr]::Zero); Start-Sleep -Milliseconds 700
+  return ((Find-TopWindow '#32768') -eq [IntPtr]::Zero)
+}
+
+# 挑两行都能点的(下面那张表是机器上真实的窗口, 行数够不够、有没有被盖住都不由我们说了算)
+$pairs = @()
+$coverLogged = $false
+foreach($p in @(@(2,5),@(4,7),@(3,6),@(1,4))){
+  if($pairs.Count -ge 2){ break }
+  if($p[1] -ge $nItems2){ continue }
+  if(-not (Row-Clickable (Row-Y $p[0])) -or -not (Row-Clickable (Row-Y $p[1]))){
+    # 点不到就说清楚是谁盖在上面 —— 真鼠标一点下去会打到它身上, 宁可不动手
+    if(-not $coverLogged){
+      $coverLogged = $true
+      $o = Get-ClientOrigin $lv
+      $hit = [VW]::WindowFromPoint((To-Pt ($o[0]+60) ($o[1]+(Row-Y $p[0]))))
+      $sb = New-Object System.Text.StringBuilder 128
+      [void][VW]::GetClassNameW($hit,$sb,128)
+      $dr = Get-RectOf $script:hMain
+      Log ("  第 {0} 行那一点点不到列表: 上面盖着 hwnd={1} cls='{2}' cap='{3}'; 工具窗口={4},{5},{6},{7} 列表={8}" -f `
+        $p[0],([int64]$hit),$sb.ToString(),(Get-Cap $hit),$dr.L,$dr.T,$dr.R,$dr.B,([int64]$lv))
+    }
+    continue
+  }
+  $pairs += ,$p
+}
+Chk ($pairs.Count -ge 2) ('(2h) 挑到 {0} 组可点的行(每组: 先选中前一行, 再右键后一行)' -f $pairs.Count)
+
+# 这一段的“行号”断言必须在**列表冻着**的时候做: 列表按 Z 序排, 一开自动刷新就要每 2.5 秒
+# 重排一次, 从“读到某行的名字”到“真的把光标点上去”之间那一行可能已经换人了(实测有一轮
+# 整块挪了 3 行, 于是右键盘点到隔壁窗口上) —— 那是表在动, 不是选中行飘。重建的影响放到
+# 下面阶段二单独量, 并且只按“哪个窗口”量、不按行号。
+$lastRow = -1; $lastName = ''
+foreach($p in $pairs){
+  $prevRow = $p[0]; $row = $p[1]
+  $cyPrev = Row-Y $prevRow; $cyRow = Row-Y $row
+  $nNow = [int][VW]::SendMessageW($lv,0x1004,[IntPtr]::Zero,[IntPtr]::Zero)
+  if($row -ge $nNow){
+    Log ("  条目只剩 {0} 行, 跳过第 {1} 行" -f $nNow,$row)
+    continue
+  }
+
+  # 被右键那一行的应用名: 投递一次左键问程序自己(按钮会改名为「<应用名>快排」)
+  $nameRow = Get-RowNameAt $btnTile $lv $cyRow
+  # 再把选中行挪到**别的**那一行 —— 这正是用户的操作: 列表里选着 A, 却去右键 B
+  $null = Get-RowNameAt $btnTile $lv $cyPrev
+  $selBefore = Sel-Set $lv
+  Log ("  前置: 选中={0} (要右键的是第 {1} 行 '{2}')" -f (Set-Text $selBefore),$row,$nameRow)
+
+  # 这一下是真鼠标。落点是“客户区原点 + 行号换算的 y”, 所以这 600 毫秒里工具窗口**不能动** ——
+  # 机器上有人正在拖窗口/最大化时, 窗口一挪同样的落点就落到别的行上去了(实测: 工具窗口被最大化后
+  # 客户区原点变了, 算好第 5 行的落点, 右键按中的是第 2 行 —— 代码没错, 是窗口动了)。
+  # 所以每次点击前后各量一次列表矩形: 动过就作废重来, 只有“窗口没动、选中行还是不对”才算程序的账。
+  $m = [IntPtr]::Zero
+  $drifted = $false
+  for($try = 1; $try -le 3; $try++){
+    $rcB = Get-RectOf $lv
+    $m = Open-RowMenu $cyRow
+    $rcA = Get-RectOf $lv
+    $drifted = ($rcB.L -ne $rcA.L) -or ($rcB.T -ne $rcA.T)
+    if($drifted){
+      $null = Log ("  第 {0} 次右键期间列表动过({1},{2} -> {3},{4}), 这次不算数, 重来" -f $try,$rcB.L,$rcB.T,$rcA.L,$rcA.T)
+      if($m -ne [IntPtr]::Zero){ [void](Close-Menu-Esc) }
+      continue
+    }
+    if($m -ne [IntPtr]::Zero){ break }
+  }
+  if($drifted){
+    Log ("  WARN: 连着三次都没等到窗口不动(机器上有人在动窗口), 第 {0} 行这组跳过, 不记失败" -f $row)
+    continue
+  }
+  if($m -eq [IntPtr]::Zero){
+    Chk $false ('(2h) 右键第 {0} 行没能弹出菜单(被别的窗口盖住?)' -f $row)
+    continue
+  }
+  $selAfter = Sel-Set $lv
+  $btnCap = Get-Cap $btnTile.Hwnd
+  Log ("  右键第 {0} 行后: 选中={1} 按钮='{2}'" -f $row,(Set-Text $selAfter),$btnCap)
+  Chk ($selAfter.Count -eq 1 -and $selAfter[0] -eq $row) ('(2h) 右键第 {0} 行 -> 选中的就是这一行(不是别的行)' -f $row)
+  Chk ($btnCap -eq $nameRow) ('(2h) 「应用快排」跟着右键那一行走(期望 ' + $nameRow + ', 实际 ' + $btnCap + ')')
+
+  $closed = Close-Menu-Esc
+  Log ("  ESC 关菜单 = {0}" -f $closed)
+  $lastRow = $row; $lastName = $nameRow
+}
+
+# 阶段二: 打开自动刷新, 跨过一轮整表重建 —— 重建只按窗口句柄还原选中行, 所以能保证的是
+# “选中的还是同一个窗口、且仍旧只有一行”; 行号不保证(表按 Z 序排, 期间有窗口动过就会挪位)。
+if($auto -and $lastRow -ge 0){
+  $p1.Refresh()
+  Log ("  阶段二开始: driver pid={0} alive={1} title='{2}' 条目={3}" -f `
+    $p1.Id,(-not $p1.HasExited),(Get-Cap $script:hMain),([int][VW]::SendMessageW($lv,0x1004,[IntPtr]::Zero,[IntPtr]::Zero)))
+  [void][VW]::SendMessageW($auto.Hwnd,0x00F5,[IntPtr]::Zero,[IntPtr]::Zero)
+  Start-Sleep -Milliseconds 3300
+  $selKeep = Sel-Set $lv
+  $capKeep = Get-Cap $btnTile.Hwnd
+  $p1.Refresh()
+  $errDlg = Find-TopWindow '#32770'
+  Log ("  开自动刷新 + 跨过一轮重建后: 选中={0} 按钮='{1}' (重建前是第 {2} 行 '{3}')" -f `
+    (Set-Text $selKeep),$capKeep,$lastRow,$lastName)
+  Log ("    driver alive={0} title='{1}' 条目={2} 弹窗={3}" -f `
+    (-not $p1.HasExited),(Get-Cap $script:hMain),([int][VW]::SendMessageW($lv,0x1004,[IntPtr]::Zero,[IntPtr]::Zero)),([int64]$errDlg))
+  if($errDlg -ne [IntPtr]::Zero){ Log ("    弹窗正文: " + (Get-DialogText $errDlg)) }
+  Chk ($selKeep.Count -eq 1) '(2h) 整表重建后仍是单选(没有几行一起亮)'
+  Chk ($capKeep -eq $lastName) ('(2h) 整表重建后选中的还是同一个窗口(应用名 ' + $lastName + ' 不变)')
+  if($selKeep.Count -eq 1 -and $selKeep[0] -ne $lastRow){
+    Log ("  行号 {0} -> {1}: 表按 Z 序排, 这一会儿有窗口动过, 行号整体挪位不奇怪" -f $lastRow,$selKeep[0])
+  }
+} else { Log '  WARN: 没找到自动刷新复选框, 跳过“整表重建”那一半' }
+
+# 还原: 自动刷新回到原样 + 窗口尺寸与置顶状态回到原样
+if($auto -and -not $autoWas){ [void][VW]::SendMessageW($auto.Hwnd,0x00F5,[IntPtr]::Zero,[IntPtr]::Zero) }
+if(-not $drTop){
+  [void][VW]::SetWindowPos($script:hMain,[IntPtr](-2),0,0,0,0,$SWP_NMNA)   # HWND_NOTOPMOST
+}
+[void][VW]::SetWindowPos($script:hMain,[IntPtr]::Zero,$dr1.L,$dr1.T,($dr1.R-$dr1.L),($dr1.B-$dr1.T),$SWP_NA)
+Start-Sleep -Milliseconds 400
+Log ("  还原: 置顶={0} 工具窗口={1},{2},{3},{4}" -f (EX-TopMost $script:hMain),$dr1.L,$dr1.T,$dr1.R,$dr1.B)
+if($cursorSaved2){ [void][VW]::SetCursorPos($pt0.X,$pt0.Y) }
 
 # ============ 清理 ============
 try { Stop-Process -Id $p1.Id -Force -ErrorAction SilentlyContinue } catch {}

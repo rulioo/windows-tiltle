@@ -70,8 +70,9 @@ type
     FMenuHwnd: HWND;
     FMenuPid: DWORD;
     FMenuApp: string;
-    // 右键按下的位置(列表客户端坐标)。OnPopup 拿不到坐标, 所以在这里先接住 ——
-    // 消息里带的坐标是可靠的; 而 Mouse.CursorPos 对合成消息和键盘唤出的菜单都不作数。
+    // 右键按下的位置(列表客户端坐标)。OnPopup 拿不到坐标, 所以在消息派发前先接住
+    // (AppMessage 里那条 WM_RBUTTONDOWN)。**不能**改挂在 Lv.OnMouseDown 上 ——
+    // 见 AppMessage 的注释。
     FPopupPt: TPoint;
     FPopupPtValid: Boolean;
 
@@ -99,8 +100,7 @@ type
     procedure OnListChange(Sender: TObject; Item: TListItem; Change: TItemChange);
     procedure OnListClicked(Sender: TObject);
     procedure OnListSelectItem(Sender: TObject; Item: TListItem; Selected: Boolean);
-    procedure OnListMouseDown(Sender: TObject; Button: TMouseButton;
-      Shift: TShiftState; X, Y: Integer);          // 记下右键按在哪一行
+    procedure AppMessage(var Msg: TMsg; var Handled: Boolean); // 派发前接住右键按在哪一行
     procedure OnListPopup(Sender: TObject);        // 右键菜单弹出前: 把目标锁定到光标下那一行
     procedure OnKillProcessClick(Sender: TObject); // 结束进程: 强制结束该行窗口所属的进程(先确认)
     procedure OnGotoAppClick(Sender: TObject);     // 转到应用: 还原并激活该行窗口
@@ -1207,13 +1207,17 @@ begin
   end;
 end;
 
-{ 右键按下就记下坐标: 菜单弹出时 OnPopup 不带坐标, 只能靠这个。 }
-procedure TMainForm.OnListMouseDown(Sender: TObject; Button: TMouseButton;
-  Shift: TShiftState; X, Y: Integer);
+{ 右键按在列表的哪一行, 要在消息派发到控件**之前**接住。
+  挂 Lv.OnMouseDown 是不行的: 列表视图收到 WM_RBUTTONDOWN 时会先同步发出 NM_RCLICK,
+  VCL 当场把菜单弹起来并进入菜单自己的模态循环, 等菜单关掉才轮到 OnMouseDown ——
+  实测每次都慢一拍(OnPopup 读到的 82/142/202 正是上几次点击的坐标), 菜单老作用在上一行,
+  这就是“右键某一行, 却总是别的行被选中”。
+  Application.OnMessage 拿的是消息派发前的原始消息, 位置准、时机也准。 }
+procedure TMainForm.AppMessage(var Msg: TMsg; var Handled: Boolean);
 begin
-  if Button = mbRight then
+  if (Msg.message = WM_RBUTTONDOWN) and (Lv <> nil) and (Msg.hwnd = Lv.Handle) then
   begin
-    FPopupPt := Point(X, Y);
+    FPopupPt := Point(SmallInt(LoWord(DWORD(Msg.lParam))), SmallInt(HiWord(DWORD(Msg.lParam))));
     FPopupPtValid := True;
   end;
 end;
@@ -1235,15 +1239,19 @@ begin
     Exit;
 
   if FPopupPtValid then
-    p := FPopupPt                    // 右键按下的位置(可靠)
+  begin
+    // 右键是鼠标按出来的: 菜单就弹在光标那儿, 认这个坐标准没错
+    p := FPopupPt;
+    it := Lv.GetItemAt(p.X, p.Y);
+    // 光标停在列表的空白处(表头下方没行的地方)时不猜 —— 两项都置灰, 免得误伤别的窗口。
+    // 光标压根不在列表上(合成消息等怪情况)才退回当前选中行。
+    if (it = nil) and not PtInRect(Lv.ClientRect, p) then
+      it := Lv.Selected;
+  end
   else
-    p := Lv.ScreenToClient(Mouse.CursorPos);   // 说不清来源时, 退回光标当前位置
-  FPopupPtValid := False;
-  it := Lv.GetItemAt(p.X, p.Y);
-  // 光标不在列表上(例如 Shift+F10 从键盘唤出菜单)时退回当前选中行;
-  // 但光标就停在列表的空白处时不猜 —— 那种情况下两项都置灰, 免得误伤别的窗口。
-  if (it = nil) and not PtInRect(Lv.ClientRect, p) then
+    // 键盘唤出(Shift+F10 / 菜单键)没有右键坐标, 就是当前选中行
     it := Lv.Selected;
+  FPopupPtValid := False;
 
   if it <> nil then
   begin
@@ -1590,14 +1598,17 @@ begin
   Lv.Checkboxes := True;
   Lv.ReadOnly := True;
   Lv.RowSelect := True;
-  Lv.MultiSelect := True;
+  // 单选: 右键菜单只作用于一行, 选中集合必须就那一行 ——
+  // 多选时 it.Selected := True 是**累加**的, 右键一圈下来几行都亮着,
+  // 加上 2.5 秒一次的整表重建只认得 Lv.Selected(焦点行), 选中行会飘到旧行去。
+  // 平铺选哪些窗口是靠勾选框的, 这里多选没有用处。
+  Lv.MultiSelect := False;
   Lv.HideSelection := False;
   Lv.ColumnClick := True;   // 点击表头排序
   Lv.DoubleBuffered := True;
   Lv.OnChange := OnListChange;
   Lv.OnClick := OnListClicked;
   Lv.OnSelectItem := OnListSelectItem;   // 记录选中的应用程序(供“应用快排”)
-  Lv.OnMouseDown := OnListMouseDown;     // 记下右键按在哪一行(供右键菜单)
   Lv.OnColumnClick := OnColumnClick;
 
   col := Lv.Columns.Add;
@@ -2005,6 +2016,9 @@ begin
   BuildUI;
   RefreshApps;
 
+  // 右键菜单要按“光标底下那一行”定位, 坐标得在消息派发前接住(理由见 AppMessage)
+  Application.OnMessage := AppMessage;
+
   Timer := TTimer.Create(Self);
   Timer.Interval := 2500;
   Timer.Enabled := ChkAuto.Checked;
@@ -2019,6 +2033,8 @@ end;
 
 destructor TMainForm.Destroy;
 begin
+  if Application <> nil then
+    Application.OnMessage := nil;
   Timer.Free;
   AboutTimer.Free;
   FAboutPopup.Free;
