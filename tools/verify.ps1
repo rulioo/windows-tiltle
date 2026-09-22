@@ -56,6 +56,11 @@ public class VW {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h, int id);
   [DllImport("user32.dll")] public static extern int GetMenuItemCount(IntPtr m);
+  // 菜单项在屏幕上的**精确**矩形(菜单正显示时才有效) —— 按"高度的百分之几"猜落点会差几像素,
+  // 差到菜单上边框上那一下就点空了(2026-09-23 第一轮就是两处第一项点空: 菜单弹了、项也是可点的,
+  // 却什么都没发生)。owner 是弹出这个菜单的窗体。
+  [DllImport("user32.dll")] public static extern bool GetMenuItemRect(IntPtr owner, IntPtr hmenu, uint item, out VERECT r);
+  [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr h, out int pid);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out VERECT r);
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out VERECT r);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextLengthW(IntPtr h);
@@ -216,6 +221,53 @@ function Open-RowMenu($clientY){
     Start-Sleep -Milliseconds 250
   }
   return [IntPtr]::Zero
+}
+# 点菜单里第 idx 项(0=结束进程 1=转到应用): 优先用 GetMenuItemRect 拿那一项的**真实矩形**取中心,
+# 拿不到再退回按高度的 frac 段猜。菜单项本身不高(24px 上下), 猜出来的落点离上边框只差十来像素,
+# 偏一点就点空 —— 而且点空时菜单只是关掉、什么也不会发生, 看起来就像"功能坏了"。
+function Find-MenuOwner($m,$ownerPid){
+  # 形参别叫 $pid —— 那是 PowerShell 的只读自动变量(当前进程号), 一赋值就报
+  # “无法覆盖变量 pid, 因为该变量为只读或常量”。
+  # 弹出菜单的**属主**是 VCL 里那个隐藏的 TPopupList 窗口(AllocateHWnd 出来的, 类名 'TPUtilWindow'),
+  # 不是主窗体 —— Vcl.Menus.pas 的 TPopupMenu.Popup 里 TrackPopupMenu(..., PopupList.Window, nil)
+  # 传的就是它。GetMenuItemRect 拿主窗体当属主一律返回 false。
+  # 同一进程里可以有好几个 TUtilWindow(谁都能 AllocateHWnd), 所以按类名+PID 先把候选全收下来,
+  # 由调用方拿"矩形确实落在菜单窗口里"来筛。
+  # 回调跑在脚本作用域里(跟 Find-TopWindow 一样用 $script: 存, 不靠闭包捕获)
+  $script:menuOwners = New-Object System.Collections.Generic.List[IntPtr]
+  $script:menuOwnerPid = $ownerPid
+  $cb = { param($h,$l)
+    $sb = New-Object System.Text.StringBuilder 128
+    [void][VW]::GetClassNameW($h,$sb,128)
+    if($sb.ToString() -eq 'TPUtilWindow'){
+      $p = 0; [void][VW]::GetWindowThreadProcessId($h,[ref]$p)
+      if($p -eq $script:menuOwnerPid){ $script:menuOwners.Add($h) }
+    }
+    return $true }
+  $g = [Runtime.InteropServices.GCHandle]::Alloc($cb)
+  try { [void][VW]::EnumWindows($cb,[IntPtr]::Zero) } finally { $g.Free() }
+  return $script:menuOwners
+}
+function Click-MenuItemIdx($m,$idx,$frac){
+  $hm = [VW]::SendMessageW($m,0x01E1,[IntPtr]::Zero,[IntPtr]::Zero)            # MN_GETHMENU
+  $mp = 0; [void][VW]::GetWindowThreadProcessId($m,[ref]$mp)
+  $mr = Get-RectOf $m
+  if($hm -ne [IntPtr]::Zero){
+    foreach($own in @(Find-MenuOwner $m $mp)){
+      $ir = New-Object VERECT
+      if(-not [VW]::GetMenuItemRect($own,$hm,[uint32]$idx,[ref]$ir)){ continue }
+      # 认下来的条件是这一项**确实在菜单窗口里**(属主猜错时算出来的矩形会跑到天边去)
+      if($ir.L -lt ($mr.L - 4) -or $ir.T -lt ($mr.T - 4) -or $ir.R -gt ($mr.R + 4) -or $ir.B -gt ($mr.B + 4)){ continue }
+      $ix = [int](($ir.L + $ir.R)/2); $iy = [int](($ir.T + $ir.B)/2)
+      if(([VW]::WindowFromPoint((To-Pt $ix $iy))) -ne $m){ continue }
+      $null = Log ("  菜单项 {0} 实测矩形 {1},{2}-{3},{4} -> 点 ({5},{6})" -f $idx,$ir.L,$ir.T,$ir.R,$ir.B,$ix,$iy)
+      Real-Click $ix $iy $false
+      Start-Sleep -Milliseconds 900
+      return $true
+    }
+    $null = Log ("  菜单项 {0} 量不到真实矩形(属主没找着), 退回按菜单高度的 {1} 猜" -f $idx,$frac)
+  }
+  return (Click-MenuItem $m $frac)
 }
 # 点菜单里的第 frac 段(两项时: 0.25=第一项 0.75=第二项)
 function Click-MenuItem($m,$frac){
@@ -437,10 +489,33 @@ if($h1 -ne [IntPtr]::Zero -and $h2 -ne [IntPtr]::Zero){
     }
   }
 
+  # ---- (2c-2) 左下角常驻版权条: 文案 + 真的在主窗口左下角 + 不被底行按钮压住 ----
+  # 用户的要求: 版权与微信 wx:rulioo521235 要常驻在主界面左下角(不能只藏在“关于”的悬停小窗里)。
+  $cpy = $kids | Where-Object { $_.Cls -eq 'TStaticText' -and $_.Cap -like '*wx:rulioo521235*' } | Select-Object -First 1
+  Chk ($cpy -ne $null) '左下角版权条存在(有窗口句柄, 跨进程读得到)'
+  if($cpy){
+    $cpr = Get-RectOf $cpy.Hwnd
+    $co  = Get-ClientOrigin $h1                    # 客户区左上角的屏幕坐标
+    $cr  = New-Object VERECT; [void][VW]::GetClientRect($h1,[ref]$cr)
+    $cx = $cpr.L - $co[0]; $cy = $cpr.T - $co[1]
+    Log ("  版权条: client ({0},{1}) 宽 {2} 高 {3}; 客户区 {4}x{5}" -f $cx,$cy,($cpr.R-$cpr.L),($cpr.B-$cpr.T),$cr.R,$cr.B)
+    Chk ($cx -lt ($cr.R / 3)) '版权条贴着左边缘(在客户区左 1/3 以内)'
+    Chk ($cy -gt ($cr.B * 0.8)) '版权条在主窗口底部区域(客户区下 1/5 以内)'
+    # 底行那五个快排按钮一旦加宽顶过来就会把版权盖掉(“应用快排”最长能到 240px),
+    # 所以这里量一次“有没有压上”; 按钮组真的顶过来时 LayoutActButtons 会把“应用快排”缩回去。
+    $clash2 = $false
+    foreach($b in @($kids | Where-Object { $_.Cls -eq 'TButton' -and $_.Cap -like '*快排' })){
+      if(Rects-Overlap $cpr (Get-RectOf $b.Hwnd)){ $clash2 = $true }
+    }
+    Chk (-not $clash2) '底行快排按钮没有盖住版权条'
+  }
+
   # ---- (2d) 置顶行为 ----
   $chkTop  = $kids | Where-Object { $_.Cap -eq '选定窗口置顶' } | Select-Object -First 1
   $chkSelf = $kids | Where-Object { $_.Cap -eq '本窗口置顶' } | Select-Object -First 1
-  $msg = $kids | Where-Object { $_.Cls -eq 'TStaticText' -and $_.Cap -notlike '窗口总数*' } | Select-Object -First 1
+  # 主窗体上的 TStaticText 有三个: 计数(窗口总数…)、提示条、左下角版权条。
+  # 这里要的是提示条 —— 版权条得排掉, 否则后面所有读提示文本的断言都会读到版权那句。
+  $msg = $kids | Where-Object { $_.Cls -eq 'TStaticText' -and $_.Cap -notlike '窗口总数*' -and $_.Cap -notlike '*wx:rulioo*' } | Select-Object -First 1
   Log ("prereq: chkTop={0} chkSelf={1} msg={2}" -f $(if($chkTop){'y'}else{'n'}),$(if($chkSelf){'y'}else{'n'}),$(if($msg){'y'}else{'n'}))
   $p2.Refresh(); Log ("[diag] 第二个实例存活 @2d前 = " + (-not $p2.HasExited))
   if($chkTop -and $chkSelf){
@@ -633,22 +708,43 @@ Log '== (2f) list context menu =='
 $script:hMain = $h1
 $script:hLv   = $lv
 
+# 行高(px)直接问列表控件: LVM_GETITEMSPACING(wParam=1) 返回值的高 16 位就是每行多高,
+# 不用给控件传指针, 跨进程是安全的。
+# **千万别写死 20**: 实测这台机器上是 21(随 DPI/字体走), 按 20 递推每行差 1px, 第 14 行
+# 就整整偏出去一行 —— 2026-09-23 机器上窗口一多(16 行), 靶子行落到最后几行,
+# 每个落点都点到上一行去, 于是"列表里没看到靶子那一行", (2f)/(2g) 连红两轮。
+function Get-RowPitch($lv){
+  $sp = [int64][VW]::SendMessageW($lv,0x1033,[IntPtr]1,[IntPtr]::Zero)
+  $cy = [int](($sp -shr 16) -band 0xFFFF)
+  if($cy -lt 8 -or $cy -gt 60){ return 21 }   # 问不出来(控件换了/句柄没了)就按实测值兜底
+  return $cy
+}
+
 # 逐行点选, 看「应用快排」按钮是否变成「DeskTiler快排」—— 那就是第二个实例所在的行。
 # (列表里读不到文字, 但按钮改名是可以跨进程读的; 驱动实例不把自己列进自己的表, 所以只有一行是它。)
 function Find-VictimRow($btnTile,$lv){
   $nItems = [int64][VW]::SendMessageW($lv,0x1004,[IntPtr]::Zero,[IntPtr]::Zero)
-  # 扫**全部**行: 原来是写死的 12 行, 机器上窗口多一条(13 行)时靶子正好落在最后一行就找不到
-  # (投递点击不需要那一行可见, 行距 20px 对任何行号都成立)
+  $pitch = Get-RowPitch $lv
+  $null = Log ("  列表 {0} 行, 实测行高 {1}px" -f $nItems,$pitch)
+  # 扫**全部**行(原来是写死的 12 行, 机器上窗口多一条时靶子正好落在最后一行就找不到)。
+  # 落点 = 32 + k*行高: 第 0 行的行顶实测在 24 上下, 所以 32 稳稳落在第 0 行里, 之后每行按
+  # 实测行高递推也都落在行内(行高 21 > 偏移差 8)。再在附近试几个点兜住行高不整除的零头。
   for($k=0; $k -lt [Math]::Min($nItems,40); $k++){
     $rowY = -1
-    foreach($cand in @(($k*20+32),($k*20+27),($k*20+37))){
+    $est = 32 + $k*$pitch
+    foreach($cand in @($est,($est+6),($est-6),($est+12),($est-12))){
+      if($cand -lt 6){ continue }
       $lp = [IntPtr]((([int]$cand) -shl 16) -bor 60)
       [void][VW]::PostMessageW($lv,0x0201,[IntPtr]1,$lp)          # WM_LBUTTONDOWN
       [void][VW]::PostMessageW($lv,0x0202,[IntPtr]::Zero,$lp)     # WM_LBUTTONUP
       Start-Sleep -Milliseconds 220
       if(([int64][VW]::SendMessageW($lv,0x100C,[IntPtr](-1),[IntPtr]2)) -eq $k){ $rowY=$cand; break }  # LVM_GETNEXTITEM/LVNI_SELECTED
     }
-    if($rowY -lt 0){ continue }
+    if($rowY -lt 0){
+      # 点不中要留痕: 从前这里闷着 continue, 看起来就像"列表里根本没这一行", 白查了半天
+      $null = Log ("    row {0} 点不中(y={1} 附近五个落点都没落到它身上)" -f $k,$est)
+      continue
+    }
     $rc = Get-Cap $btnTile.Hwnd
     $null = Log ("  row {0} (client y={1}) -> '{2}'" -f $k,$rowY,$rc)
     if($rc -eq 'DeskTiler快排'){ return $rowY }
@@ -669,13 +765,15 @@ function Test-VictimRow($btnTile,$lv,$clientY){
   return ((Get-RowNameAt $btnTile $lv $clientY) -eq 'DeskTiler快排')
 }
 
-# 找行找到的是行的**上边缘**, 而那就是行边界: 真点击只要偏下半个像素就落到上一行。
-# 所以再往行中间挪, 每挪一个位置都投递点击复核一次, 挑出第一个仍然属于靶子行的 y。
-function Pick-VictimPoint($btnTile,$lv,$rowTop){
-  foreach($off in @(10,8,6,12,0)){
-    $cy = $rowTop + $off
+# 找行给的是一个**落在靶子行内**的 y(不保证在行中间), 而真点击偏半个像素就可能落到隔壁行,
+# 所以以它为中心往两边各试几个点, 每试一个都投递点击复核一次, 挑出第一个仍然属于靶子行的 y。
+# 跨度 ±12 足够盖住任何一行(实测行高 21): 无论起点贴着行顶还是行底, 总有一个落点落在行内。
+function Pick-VictimPoint($btnTile,$lv,$rowY){
+  foreach($off in @(0,-4,4,-8,8,-12,12)){
+    $cy = $rowY + $off
+    if($cy -lt 6){ continue }
     if((Get-RowNameAt $btnTile $lv $cy) -eq 'DeskTiler快排'){
-      $null = Log ("  落点 client y={0} (行顶 {1} + {2}) 复核通过" -f $cy,$rowTop,$off)
+      $null = Log ("  落点 client y={0} (找行给的是 {1}, 偏移 {2}) 复核通过" -f $cy,$rowY,$off)
       return $cy
     }
   }
@@ -748,9 +846,10 @@ if($victimY -ge 0){
       $lvn[0],$lvn[1],([int64][VW]::SendMessageW($lv,0x1004,[IntPtr]::Zero,[IntPtr]::Zero)))
 
     # (b) 第一项 = 结束进程 -> 原生确认框(正文有句柄, 跨进程读得到)
-    [void](Click-MenuItem $m 0.25)
+    [void](Click-MenuItemIdx $m 0 0.25)
     Start-Sleep -Milliseconds 300
     $dlg = Find-TopWindow '#32770'
+    if($dlg -eq [IntPtr]::Zero -and $msg){ $null = Log ("  没弹出确认框, 程序底部提示='{0}'" -f (Get-Cap $msg.Hwnd)) }
     $dtit = ''; $dtxt = ''
     if($dlg -ne [IntPtr]::Zero){ $dtit = Get-Cap $dlg; $dtxt = Get-DialogText $dlg }
     Log ("  dialog: title='{0}' text='{1}'" -f $dtit,($dtxt -replace "`r`n",' // '))
@@ -777,7 +876,7 @@ if($victimY -ge 0){
       $m2 = Open-VictimMenu $btnTile $lv
       if($m2 -eq [IntPtr]::Zero){ $null = Log ("  第 {0} 次: 右键没能弹出菜单" -f $try); continue }
       $tried++
-      [void](Click-MenuItem $m2 0.75)
+      [void](Click-MenuItemIdx $m2 1 0.75)
       Start-Sleep -Milliseconds 700
       $fg = [VW]::GetForegroundWindow()
       $null = Log ("  第 {0} 次「转到应用」: fg={1} '{2}' (target {3} 最小化={4}; 工具最小化={5})" -f `
@@ -790,7 +889,7 @@ if($victimY -ge 0){
     # (e) 再走一遍结束进程, 这次点「是」 -> 进程真的没了
     $m3 = Open-VictimMenu $btnTile $lv
     if($m3 -ne [IntPtr]::Zero){
-      [void](Click-MenuItem $m3 0.25)
+      [void](Click-MenuItemIdx $m3 0 0.25)
       Start-Sleep -Milliseconds 300
       $dlg2 = Find-TopWindow '#32770'
       $t2 = ''
@@ -861,7 +960,7 @@ if($hw -ne [IntPtr]::Zero -and $ref2 -and $chkSelf){
 
   $mg = Open-VictimMenu $btnTile $lv
   if($mg -ne [IntPtr]::Zero){
-    [void](Click-MenuItem $mg 0.75)                                             # 第二项 = 转到应用
+    [void](Click-MenuItemIdx $mg 1 0.75)                                        # 第二项 = 转到应用
     Start-Sleep -Milliseconds 900
     $fg = [VW]::GetForegroundWindow()
     $coverAfter = Root-Of ([VW]::WindowFromPoint((To-Pt $tcx $tcy)))
@@ -891,7 +990,7 @@ if($hw -ne [IntPtr]::Zero -and $ref2 -and $chkSelf){
     $mg2 = Open-VictimMenu $btnTile $lv
     if($mg2 -eq [IntPtr]::Zero){ $null = Log ("  第 {0} 次: 右键没能弹出菜单" -f $try); continue }
     $tried2++
-    [void](Click-MenuItem $mg2 0.75)
+    [void](Click-MenuItemIdx $mg2 1 0.75)
     Start-Sleep -Milliseconds 900
     $fg2 = [VW]::GetForegroundWindow()
     $null = Log ("  第 {0} 次「转到应用」(不重叠): fg={1} '{2}' (target {3}) 工具最小化={4}" -f `
@@ -977,8 +1076,11 @@ if($auto){
 $nItems2 = [int][VW]::SendMessageW($lv,0x1004,[IntPtr]::Zero,[IntPtr]::Zero)     # LVM_GETITEMCOUNT
 Log ("  items={0}" -f $nItems2)
 
-# 行 k 的落点(客户区 y): 行顶 = 32 + 20k, 取行中间
-function Row-Y($k){ return (32 + $k*20 + 10) }
+# 行 k 的落点(客户区 y)。同样**不能用写死的 20**: 行高实测 21(见 Get-RowPitch),
+# 按 20 递推的话第 14 行往后每一行都会点到上一行去。这里按实测行高递推, 再往下 6px 取行内。
+$pitch2 = Get-RowPitch $lv
+Log ("  (2h) 实测行高 {0}px" -f $pitch2)
+function Row-Y($k){ return (32 + $k*$pitch2 + 6) }
 function Row-Clickable($clientY){
   $o = Get-ClientOrigin $lv
   return ([VW]::WindowFromPoint((To-Pt ($o[0]+60) ($o[1]+$clientY))) -eq $lv)

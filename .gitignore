@@ -17,6 +17,9 @@ DeskTilerVersion.rc
 
 # Archival / packaging bundle
 DeskTiler.zip
+# 发布包: install/ 里是 DeskTiler.exe + 收款码 + README + 安装说明 和打好的 zip
+# (由 tools/pack.ps1 生成; 二进制不进仓库, 要进仓库得 git add -f)
+install/
 
 # Outputs written into the project dir by tools/verify.ps1 / CLI self-test modes
 verify.log

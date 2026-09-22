@@ -7,7 +7,8 @@
 - 底部**显示器**下拉可选择平铺到哪台显示器（默认**自动** = 多数勾选窗口所在的那台）；
 - 顶部**全选**复选框、**选定窗口置顶 / 本窗口置顶**复选框、表头点击排序、窗口/已选计数；底部五个快排按钮
   （从左到右：目录快排 / PowerShell快排 / Cmd快排 / 应用快排 / 一键全排）；平铺后自动激活所选窗口；
-- 列表里**右键任意一行**可以「结束进程」或「转到应用」。
+- 列表里**右键任意一行**可以「结束进程」或「转到应用」；
+- **左下角常驻一行灰字**：`版权所有 © rulioo · 微信 wx:rulioo521235`（不用悬停「关于」也看得见）。
 
 ## 运行
 
@@ -21,6 +22,8 @@
    右上角实时显示 **窗口总数 / 已选择**；最右上角是蓝色带下划线的 **关于** 链接：鼠标悬停即在其下方
    弹出收款二维码图片（取自程序同目录 `300收款码.jpg`）：**点击图片立即关闭**；鼠标移开约 0.6 秒后也会自动关闭。
    （图片紧贴“关于”链接下缘弹出，鼠标垂直下移即可到达图片上点击。）
+   图片下方是两条灰字：**版本条**（`DeskTiler v<版本> · build <构建号> · 构建时间`）与**版权条**
+   （`版权所有 © rulioo · 微信 wx:rulioo521235`）。
 2. 点击任意**表头**可排序：第 1 次点升序、再点一次切为降序（表头显示 ▲/▼ 指示当前列与方向）；
    点第 1 列「应用程序」按应用名排，点第 2 列「窗口标题」按标题排；已点过表头后，自动刷新仍保持该排序方式；
 3. 在列表中勾选需要整理的窗口（或用顶部**全选**复选框一键勾选 / 取消）；
@@ -51,6 +54,9 @@
    > 五个快排按钮的位置由 `LayoutActButtons` 显式计算（不用 alRight 停靠）—— 同一父容器里
    > 多个 alRight 兄弟控件的停靠次序并不等于创建次序，靠停靠会摆错顺序。
    > 「应用快排」改名后宽度会变，那次改动走的也是同一条重排路径（宽度变了就整行重摆一次）。
+   > 这一行的**左端是左下角那行版权灰字**（`LblCopy`，也是显式定位）：按钮组是从右往左摆的，
+   > 名字长到会压上版权时 `LayoutActButtons` 会把「应用快排」缩回去（最小 92px），
+   > 缩到最小还挤不下才让它压过去（那已经窄到连按钮都摆不开了）。
 7. 顶部两个**置顶**复选框（各管一头，互不影响）：
    - **选定窗口置顶**：管**列表里被勾选的目标窗口**。打勾 = 把它们设为置顶（`WS_EX_TOPMOST`，浮在所有
      普通窗口之前）；取消 = 恢复普通层级。开关打开期间，之后**每勾一行都会立刻置顶**，点**全选**
@@ -151,9 +157,47 @@ DeskTiler.rc       资源脚本（图标 + manifest + 版本信息）
 DeskTiler.manifest 程序清单（Common-Controls v6、asInvoker、PerMonitorV2 DPI）
 tools/makeicon.ps1 图标生成脚本（构建时自动调用）
 tools/bumpversion.ps1 构建号自增并生成 uVersion.inc / DeskTilerVersion.rc（构建时自动调用）
+tools/verify.ps1   全套端到端断言（驱动真实窗口 + 真鼠标，跑完看 RESULT 行）
+tools/pack.ps1     打发布包到 install/（见下「发布包」）
+tools/install-readme.txt 发布包里那份「安装说明.txt」的正文（@VER@ 为版本占位）
 ```
 
 > 注意：`uMain.pas` 内的中文字符串需以 **UTF-8 带 BOM** 保存，`dcc32` 才能正确识别；
 > `build.cmd` 与 `uMain.dfm`/`DeskTiler.rc`/`manifest` 请保持纯 ASCII（避免不同代码页误解析）。
 > `uVersion.inc`、`DeskTilerVersion.rc` 由构建自动生成（纯 ASCII、无 BOM），已列入 `.gitignore`；
 > `uMain.pas` 里 `{$I uVersion.inc}` 必须放在 implementation 的 `uses` 之后（const 不能写到 uses 前面）。
+
+## 发布包
+
+`install/` 是打好的发布包（已列入 `.gitignore`，二进制不进仓库）：
+
+```
+install/DeskTiler.exe                  主程序（含图标、清单、版本信息）
+install/300收款码.jpg                  「关于」悬停时显示的收款码，必须与 exe 同目录
+install/README.md                      本说明
+install/安装说明.txt                    给最终用户的一页说明
+install/DeskTiler-v<版本>-win32.zip     上面四个文件打成的包（解压后是一个同名文件夹）
+```
+
+重新打包一条命令：
+
+```
+build.cmd                                    :: 出新 exe（顺带把版本号 +1）
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify.ps1    :: 全套断言跑绿再发
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\pack.ps1      :: 摆进 install/ 并压包
+```
+
+`tools/pack.ps1` 从 exe 的版本资源里取版本号当 zip 名（取不到才退回 `build.number`），
+清掉上一版的 zip，正文在 `tools/install-readme.txt`（`@VER@` 是版本占位）。
+若 `uMain.pas` 比 exe 新，它会警告"先 build 再打包"，不再往下猜。
+
+## 版权 / 联系
+
+- 版权所有 © rulioo
+- 微信：**wx:rulioo521235**
+
+这两处在程序里都能看到，写的是同一份：
+
+- **主界面左下角**常驻一行灰字（`版权所有 © rulioo · 微信 wx:rulioo521235`）；
+- 悬停顶栏「关于」链接时，收款码图片下方那两行灰字（版本条 + 版权条）；
+- exe 的版本资源里也有 `LegalCopyright`（右键属性 → 详细信息）。

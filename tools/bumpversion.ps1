@@ -55,14 +55,15 @@ $rc = @"
   {
     BLOCK "040904B0"
     {
-      VALUE "CompanyName", "DeskTiler"
-      VALUE "FileDescription", "DeskTiler - evenly tile open application windows on the desktop"
-      VALUE "FileVersion", "$ver"
-      VALUE "InternalName", "DeskTiler"
-      VALUE "OriginalFilename", "DeskTiler.exe"
-      VALUE "ProductName", "DeskTiler"
-      VALUE "ProductVersion", "$ver"
-      VALUE "BuildStamp", "$stamp"
+      VALUE "CompanyName", "DeskTiler\0"
+      VALUE "FileDescription", "DeskTiler - evenly tile open application windows on the desktop\0"
+      VALUE "FileVersion", "$ver\0"
+      VALUE "InternalName", "DeskTiler\0"
+      VALUE "LegalCopyright", "Copyright (C) rulioo   wx:rulioo521235\0"
+      VALUE "OriginalFilename", "DeskTiler.exe\0"
+      VALUE "ProductName", "DeskTiler\0"
+      VALUE "ProductVersion", "$ver\0"
+      VALUE "BuildStamp", "$stamp\0"
     }
   }
   BLOCK "VarFileInfo"

@@ -48,6 +48,7 @@ type
     CmbMon: TComboBox;       // 目标显示器下拉(0=自动选择); Items[1..n] 与 FMonitors 平行
     FMonitors: TArray<HMONITOR>;
     LblStatus, LblMsg: TStaticText; // LblStatus=窗口计数; LblMsg=提示/操作结果 (TStaticText=有句柄, 便于自动化校验)
+    LblCopy: TStaticText;       // 左下角的版权/联系条(常驻显示, 不用悬停“关于”也能看见)
     LblAbout: TLabel;           // 顶部“关于”链接(悬停显示收款码图片)
     FAboutPopup: TForm;         // 悬停弹出的收款码小窗(无边框、置顶、不抢焦点)
     FAboutShown: Boolean;       // 收款码小窗当前是否可见(用于跳过鼠标进入自身引发的重入)
@@ -1457,13 +1458,16 @@ end;
 
 { 底部快捷按钮组: 从右往左依次摆 一键全排 / 应用快排 / Cmd快排 / PowerShell快排 / 目录快排,
   所以从左往右看就是 目录快排 → PowerShell快排 → Cmd快排 → 应用快排 → 一键全排
-  (“一键全排”排在最右端; “应用快排”紧挨在它左边)。 }
+  (“一键全排”排在最右端; “应用快排”紧挨在它左边)。
+  这一行的左端留给左下角的版权条(LblCopy), 按钮加宽到会压上去时把“应用快排”缩回来。 }
 procedure TMainForm.LayoutActButtons;
 const
   GAP = 6;      // 按钮之间的横向间隙
+  LMARGIN = 12; // 整组距面板左缘留白(版权条的左端)
   RMARGIN = 12; // 整组距面板右缘留白
+  APPMINW = 92; // “应用快排”的最小宽度(和创建时的初始宽度一致)
 var
-  x, h, y: Integer;
+  x, h, y, appW, limit: Integer;
 
   { 把某个按钮贴着 x 的右端摆好, 返回它左缘的横坐标（即下一个按钮的右端） }
   function Place(const B: TButton; var CurX: Integer; const AY, AH: Integer): Integer;
@@ -1481,10 +1485,32 @@ begin
   if y < 0 then y := 0;
   x := pnlActs.ClientWidth - RMARGIN;
   Place(BtnAllTile, x, y, h);   Dec(x, GAP);   // 最右端
-  Place(BtnAppTile, x, y, h);   Dec(x, GAP);
+
+  // “应用快排”的名字会随选中的行变长(最长 240px), 会把整组往左顶。左端是版权条,
+  // 压上去就把它缩窄一点 —— 只改这一次摆放用的宽度, 不回写 BtnAppTile.Width,
+  // 免得下次重排又拿缩过的宽度当基准, 一路缩下去。
+  appW := BtnAppTile.Width;
+  if LblCopy <> nil then
+  begin
+    limit := LblCopy.Left + LblCopy.Width + 8;
+    if (x - appW) < limit then
+    begin
+      appW := appW - (limit - (x - appW));
+      if appW < APPMINW then appW := APPMINW;
+    end;
+  end;
+  x := x - appW;
+  BtnAppTile.SetBounds(x, y, appW, h);
+  Dec(x, GAP);
+
   Place(BtnCmdTile, x, y, h);   Dec(x, GAP);
   Place(BtnPsTile,  x, y, h);   Dec(x, GAP);
   Place(BtnDirTile, x, y, h);
+
+  // 左下角的版权条: 跟按钮同一行、竖向居中对齐。高度取 18(比 26 的按钮矮一点),
+  // 这样灰字看起来正好落在这一行的中间, 而不是贴着按钮的上沿。
+  if LblCopy <> nil then
+    LblCopy.SetBounds(LMARGIN, y + ((h - 18) div 2), LblCopy.Width, 18);
 end;
 
 { ---------- 构造 UI ---------- }
@@ -1660,6 +1686,21 @@ begin
   pnlActs.BevelOuter := bvNone;
   pnlActs.Caption := '';
 
+  // 左下角: 版权/联系条(常驻)。五个快排按钮全都贴在这行的**右端**(LayoutActButtons 从右往左摆),
+  // 左边这一大块本来是空的, 正好放它。
+  // 先创建 => 万一按钮加宽到压过来, 也是按钮盖住它, 不会反过来把按钮糊掉。
+  // 用 TStaticText 不用 TLabel: 它有窗口句柄, 自动化校验能跨进程读到这句版权。
+  LblCopy := TStaticText.Create(pnlActs);
+  LblCopy.Parent := pnlActs;
+  LblCopy.Align := alNone;       // 位置由 LayoutActButtons 显式摆(本单元一律不用停靠, 见该函数注释)
+  LblCopy.AutoSize := False;
+  LblCopy.Width := 250;
+  LblCopy.Transparent := True;   // 底色跟着面板走
+  LblCopy.Font.Color := clGray;
+  LblCopy.Caption := '版权所有 © rulioo   ·   微信 wx:rulioo521235';
+  LblCopy.ShowHint := True;
+  LblCopy.Hint := 'DeskTiler 版权所有 © rulioo；微信 wx:rulioo521235';
+
   // 快捷按钮组: 从左到右 = 目录快排 / PowerShell快排 / Cmd快排 / 应用快排 / 一键全排。
   // 位置由 LayoutActButtons 显式摆放, 不用 alRight 停靠 —— 同一个父容器里多个 alRight
   // 兄弟控件的停靠次序并不等于创建次序(实测对不上, 也正是“关于”链接被盖住那类坑的来源),
@@ -1813,9 +1854,9 @@ var
   P: TPoint;
   mon: TMonitor;
   wa: TRect;
-  w, h, capH: Integer;
+  w, h, capH, capH2: Integer;
   img: TImage;
-  pnl: TPanel;
+  pnl, pnl2: TPanel;
 begin
   if FAboutShown then Exit;                 // 已显示则不再处理
   // 刚点掉小窗时鼠标还停在小窗原来的位置上, 此时 VCL 可能又补一个 MouseEnter 过来。
@@ -1844,11 +1885,10 @@ begin
     FAboutPopup.OnMouseDown := OnAboutPopupMouseDown;   // 点击兜底
 
     // 底部版本条: 构建号每次自增, 一眼看出是否已更新
+    // (有窗口句柄的控件, 鼠标进出事件才可靠 —— 窗口less 的 TLabel 会让巡检判成“移出”)
     capH := 22;
     pnl := TPanel.Create(FAboutPopup);
     pnl.Parent := FAboutPopup;
-    pnl.Align := alBottom;          // 有窗口句柄的控件, 鼠标进出事件可靠
-    pnl.Height := capH;
     pnl.BevelOuter := bvNone;
     pnl.Color := clWhite;
     pnl.Font.Color := clGray;
@@ -1860,9 +1900,23 @@ begin
     pnl.OnMouseLeave := OnAboutPopupLeave;
     pnl.OnClick := OnAboutPopupClick;
 
+    // 版权条(第二行): 微信号也放这儿 —— 收款码就在上面, 联系方式和它挨着最顺手。
+    // 想放一行的话宽度不够: 版本条那串文字已经占掉将近整幅 300px。
+    capH2 := 18;
+    pnl2 := TPanel.Create(FAboutPopup);
+    pnl2.Parent := FAboutPopup;
+    pnl2.BevelOuter := bvNone;
+    pnl2.Color := clWhite;
+    pnl2.Font.Color := clGray;
+    pnl2.Alignment := taCenter;
+    pnl2.Caption := '版权所有 © rulioo   ·   微信 wx:rulioo521235';
+    pnl2.Cursor := crHandPoint;
+    pnl2.OnMouseEnter := OnAboutPopupEnter;
+    pnl2.OnMouseLeave := OnAboutPopupLeave;
+    pnl2.OnClick := OnAboutPopupClick;
+
     img := TImage.Create(FAboutPopup);
     img.Parent := FAboutPopup;
-    img.Align := alClient;
     img.Stretch := True;
     img.Cursor := crHandPoint;      // 提示可点击
     img.Picture.LoadFromFile(path);
@@ -1886,7 +1940,12 @@ begin
       end;
     if w < 260 then w := 260;   // 至少留出版本条文字的宽度
     FAboutPopup.ClientWidth := w;
-    FAboutPopup.ClientHeight := h + capH;
+    FAboutPopup.ClientHeight := h + capH + capH2;
+    // 三块摆死坐标, 不用 alClient/alBottom: 同一个父容器里两个 alBottom 的落位顺序
+    // 不跟创建顺序走(这个坑在顶栏/底栏上踩过两次), 与其猜不如算。
+    img.SetBounds(0, 0, w, h);
+    pnl.SetBounds(0, h, w, capH);
+    pnl2.SetBounds(0, h + capH, w, capH2);
   end;
 
   // 定位: 放在“关于”链接的右下方(贴顶栏下缘), 移出屏幕就收回
